@@ -1,0 +1,12 @@
+# Build artifacts
+/target/
+
+# Logs
+*.log
+
+# Editor and operating-system files
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/

@@ -1,0 +1,30 @@
+[package]
+name = "infer-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Enable CUDA Execution Provider (requires CUDA-enabled ORT binary or ORT_DYLIB_PATH).
+cuda = ["ort/cuda"]
+# Enable ROCm Execution Provider (requires ROCm-enabled ORT binary or ORT_DYLIB_PATH).
+rocm = ["ort/rocm"]
+# Enable DirectML Execution Provider on Windows. Temporary build/runtime fallback.
+directml = ["ort/directml", "ort/load-dynamic"]
+# Enable CoreML Execution Provider on macOS (Apple Silicon / Intel Mac).
+coreml = ["ort/coreml"]
+# Enable OpenVINO Execution Provider (Intel GPU/VPU on Linux).
+openvino = ["ort/openvino", "ort/load-dynamic"]
+
+[dependencies]
+ort = { version = "=2.0.0-rc.12", features = ["download-binaries"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+ndarray = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+csv = "1"
+tracing = "0.1"
+tokenizers = { version = "0.23.1", default-features = false, features = ["fancy-regex"] }
+
+[dev-dependencies]
+tempfile = "3"
