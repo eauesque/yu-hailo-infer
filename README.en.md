@@ -51,6 +51,8 @@ curl -X POST http://127.0.0.1:8100/v1/infer/clip-text \
 
 This repository provides `docs-index.yaml` (a pointer index to code files) for AI/LLM coding agents. Instead of long-form documentation for humans, agents are expected to follow instructions like this:
 
+There is also `docs/ai-reference.yaml`, an AI-facing reference covering configuration, endpoint specs, and known quirks (e.g. the auth-failure response shape differing from other error responses, the single-device serialization behavior). Point an agent there first for requests like "explain how to use/configure this service."
+
 > "Read `docs-index.yaml`, then read the code at the `path` listed in the relevant entry, and explain <your question>."
 
 Examples:
