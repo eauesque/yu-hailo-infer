@@ -1,6 +1,9 @@
 # Build artifacts
 /target/
 
+# Scratch/working files (agent-generated plans, logs, prompts)
+/tmp/
+
 # Logs
 *.log
 

@@ -18,10 +18,15 @@ use crate::hailort::{
     HailoRtResult, Llm, LlmChatMessage, LlmGenerationParams, LlmStream, Speech2Text, Vlm,
     VlmGenerationParams, VlmStream, YoloModelMetadata,
 };
+use crate::speech2text_route::speech2text_transcribe_route;
+
+pub use crate::speech2text_route::TranscribeRequest;
 
 const MAX_TEXT_BYTES: usize = 16 * 1024;
 const MAX_PROMPT_BYTES: usize = 16 * 1024;
-const MAX_TIMEOUT_MS: u32 = 120_000;
+/// Upper bound accepted for a caller-supplied inference timeout. Prevents a
+/// client from holding the HailoRT device lock indefinitely.
+pub(crate) const MAX_TIMEOUT_MS: u32 = 120_000;
 const MAX_FRAMES: usize = 8;
 const MAX_FRAME_BASE64_BYTES: usize = 8 * 1024 * 1024;
 /// Upper bound accepted for a caller-supplied `max_generated_tokens`
@@ -62,6 +67,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/infer/clip-image", post(clip_image))
         .route("/v1/infer/clip-text", post(clip_text))
         .route("/v1/infer/speech2text/tokenize", post(speech2text_tokenize))
+        .route(
+            "/v1/infer/speech2text/transcribe",
+            speech2text_transcribe_route(),
+        )
         .route("/v1/infer/llm/tokenize", post(llm_tokenize))
         .route("/v1/infer/llm/generate", post(llm_generate))
         .route("/v1/infer/llm/generate/stream", post(llm_generate_stream))
@@ -243,11 +252,11 @@ pub struct VlmGenerateStreamRequest {
     seed: Option<u32>,
 }
 
-fn api_ok(data: Value) -> Response {
+pub(crate) fn api_ok(data: Value) -> Response {
     Json(json!({"ok": true, "error": null, "data": data})).into_response()
 }
 
-fn api_error(status: StatusCode, code: &'static str, message: String) -> Response {
+pub(crate) fn api_error(status: StatusCode, code: &'static str, message: String) -> Response {
     (
         status,
         Json(json!({"ok": false, "error": code, "message": message})),
@@ -255,7 +264,7 @@ fn api_error(status: StatusCode, code: &'static str, message: String) -> Respons
         .into_response()
 }
 
-fn auth_error(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+pub(crate) fn auth_error(state: &AppState, headers: &HeaderMap) -> Option<Response> {
     if check_auth(state, headers) {
         return None;
     }
@@ -268,12 +277,12 @@ fn auth_error(state: &AppState, headers: &HeaderMap) -> Option<Response> {
     )
 }
 
-fn hailort_device_lock() -> &'static Mutex<()> {
+pub(crate) fn hailort_device_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-async fn run_hailort_task<T, F>(task: F) -> Result<T, String>
+pub(crate) async fn run_hailort_task<T, F>(task: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> HailoRtResult<T> + Send + 'static,
@@ -317,7 +326,7 @@ fn yolo_hef_path(query: &HefQuery) -> PathBuf {
         .unwrap_or_else(|| env_or_default_path("HAILO_YOLO_HEF", "yolov8n.hef"))
 }
 
-fn s2t_hef_path(path: Option<&str>) -> PathBuf {
+pub(crate) fn s2t_hef_path(path: Option<&str>) -> PathBuf {
     path.map(PathBuf::from)
         .unwrap_or_else(|| env_or_default_path("HAILO_S2T_HEF", "Whisper-Tiny.hef"))
 }

@@ -8,6 +8,7 @@
 
 pub mod hailort;
 pub mod router;
+pub mod speech2text_route;
 pub mod startup;
 
 use clap::Parser;

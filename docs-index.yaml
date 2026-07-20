@@ -66,9 +66,14 @@ entries:
     when_to_read: "VLM生成の対応範囲・画像入力が使えない理由について聞かれた時"
 
   - path: yu-infer/src/hailort/speech2text.rs
-    purpose: 音声認識のtokenize処理のみ実装。実際の音声デコード・文字起こしループは未実装(roadmap)。
+    purpose: 音声認識のtokenize・文字起こし生成処理。HTTP経由のWAVデコードとtranscribeルートはspeech2text_route.rsが担当。
     key_symbols: []
-    when_to_read: "speech2textの対応範囲・未実装部分について聞かれた時"
+    when_to_read: "speech2textの推論処理・対応範囲について聞かれた時"
+
+  - path: yu-infer/src/speech2text_route.rs
+    purpose: speech2text/transcribe HTTPルート。base64 WAVデコード、16 kHzモノラルへの変換、入力検証、HailoRT文字起こし呼び出しを実装。
+    key_symbols: [TranscribeRequest, decode_base64_wav, speech2text_transcribe_route]
+    when_to_read: "speech2textのHTTP API・音声形式・デコードエラー・transcribeルートについて聞かれた時"
 
   - path: yu-infer/src/hailort/metadata.rs
     purpose: HEFファイルのメタデータ(入出力shape・量子化パラメータ)読み取り。

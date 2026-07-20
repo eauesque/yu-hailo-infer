@@ -25,6 +25,7 @@ infer-core = { path = "../infer-core" }
 image = { workspace = true }
 base64 = { workspace = true }
 futures-util = { workspace = true }
+hound = "3"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
