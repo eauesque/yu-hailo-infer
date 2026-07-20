@@ -13,7 +13,7 @@ Hailo-10H向けRustネイティブ推論マイクロサービス。HTTP経由で
 | LLM tokenize | `POST /v1/infer/llm/tokenize` | 対応 |
 | VLMテキスト生成 | `POST /v1/infer/vlm/generate`(+`/stream`) | 対応(テキストのみ、画像添付チャットは非対応) |
 | YOLO物体検出 | `POST /v1/infer/yolo/detect` | 対応(NMS/デコード込み、v0.2〜) |
-| 音声文字起こし(speech2text) | `POST /v1/infer/speech2text/tokenize` | **未実装** — tokenizeのみ。実際の音声デコード・文字起こしパイプラインは今後のroadmap |
+| 音声文字起こし(speech2text) | `POST /v1/infer/speech2text/transcribe`(base64 WAV入力、transcribe/translate対応)、`POST /v1/infer/speech2text/tokenize` | 対応 |
 
 ## 対応デバイス
 
