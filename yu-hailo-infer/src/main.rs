@@ -5,5 +5,5 @@
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
-    yu_infer::run().await;
+    yu_hailo_infer::run().await;
 }

@@ -1,4 +1,4 @@
-# hailo-infer
+# yu-hailo-infer
 [English](README.en.md) | 日本語
 
 Hailo-10H向けRustネイティブ推論マイクロサービス。HTTP経由でCLIP embedding・WD-Taggerタグ推論・LLM生成・VLMテキスト生成・YOLO物体検出を公開する。
@@ -32,12 +32,12 @@ Hailo-10H向けRustネイティブ推論マイクロサービス。HTTP経由で
 ## クイックスタート
 
 ```bash
-cargo build --release -p yu-infer
+cargo build --release -p yu-hailo-infer
 
 # auth_token / scan_roots / instance_id はCLI引数ではなく、起動時にstdinへ
 # JSONで渡す(「起動契約」)。--port はデフォルト18771、--wd-cache-dirは必須。
 echo '{"instance_id":"local-dev","scan_roots":["/data/images"],"auth_token":"<token>"}' \
-  | ./target/release/yu-infer --port 8100 --wd-cache-dir /var/cache/yu-infer-wd
+  | ./target/release/yu-hailo-infer --port 8100 --wd-cache-dir /var/cache/yu-infer-wd
 ```
 
 ```bash
@@ -56,7 +56,7 @@ curl -X POST http://127.0.0.1:8100/v1/infer/clip-text \
 > 「`docs-index.yaml`を読み込み、該当エントリの`path`が指すコードを実際に読んだ上で、〈質問内容〉について説明してください。」
 
 例:
-> 「`docs-index.yaml`を読んで、YOLO検出のNMS/デコード実装(`infer-core/src/yolo_postprocess.rs`)がどう動くか説明して」
+> 「`docs-index.yaml`を読んで、YOLO検出のNMS/デコード実装(`yu-hailo-infer-core/src/yolo_postprocess.rs`)がどう動くか説明して」
 > 「`docs-index.yaml`を見て、CLIP画像embeddingのdequantize処理はどこにあるか教えて」
 
 ## ライセンス

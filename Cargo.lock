@@ -126,15 +126,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "auth-core"
-version = "0.1.0"
-dependencies = [
- "hex",
- "rand 0.9.5",
- "subtle",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1002,22 +993,6 @@ checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
  "hashbrown",
-]
-
-[[package]]
-name = "infer-core"
-version = "0.1.0"
-dependencies = [
- "csv",
- "image",
- "ndarray",
- "ort",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokenizers",
- "tracing",
 ]
 
 [[package]]
@@ -2665,10 +2640,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
-name = "yu-infer"
+name = "yu-hailo-auth"
 version = "0.1.0"
 dependencies = [
- "auth-core",
+ "hex",
+ "rand 0.9.5",
+ "subtle",
+]
+
+[[package]]
+name = "yu-hailo-infer"
+version = "0.1.0"
+dependencies = [
  "axum",
  "base64 0.22.1",
  "cc",
@@ -2677,7 +2660,6 @@ dependencies = [
  "hound",
  "http-body-util",
  "image",
- "infer-core",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2685,6 +2667,24 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "yu-hailo-auth",
+ "yu-hailo-infer-core",
+]
+
+[[package]]
+name = "yu-hailo-infer-core"
+version = "0.1.0"
+dependencies = [
+ "csv",
+ "image",
+ "ndarray",
+ "ort",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokenizers",
+ "tracing",
 ]
 
 [[package]]

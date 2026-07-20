@@ -14,7 +14,7 @@ meta:
     README.md's "Quick Start" curl/CLI example is outdated as of the
     speech2text work (2026-07-20): it shows `--bearer-token <token>` as a
     CLI flag, but the actual binary only accepts `--port` and
-    `--wd-cache-dir` on the CLI (see yu_infer::Cli in yu-infer/src/lib.rs).
+    `--wd-cache-dir` on the CLI (see yu_hailo_infer::Cli in yu-hailo-infer/src/lib.rs).
     auth_token / scan_roots / instance_id are supplied via a JSON "startup
     contract" written to the process's stdin (see startup_contract feature
     below) — there is no CLI flag for the bearer token. Fix tracked in
@@ -79,13 +79,13 @@ features:
     endpoints: ["GET /healthz"]
     auth_required: false
     purpose: "Liveness probe. Returns {ok: true, uptime_seconds, instance_id}."
-    related_code: "yu-infer/src/router.rs::healthz"
+    related_code: "yu-hailo-infer/src/router.rs::healthz"
 
   - name: scan_roots_hot_reload
     endpoints: ["POST /_internal/scan-roots-changed"]
     auth_required: true
     purpose: "Lets the operator push an updated scan_roots allowlist at runtime without restarting the process (paths are canonicalized on receipt). Intended for internal/operator use, not end-user clients."
-    related_code: "yu-infer/src/router.rs::scan_roots_changed"
+    related_code: "yu-hailo-infer/src/router.rs::scan_roots_changed"
 
   - name: wd_tagger
     endpoints: ["POST /v1/infer/wd"]
@@ -93,29 +93,29 @@ features:
     purpose: "WD-Tagger anime/illustration tagging on an image file already present on disk (NOT a base64 upload — this endpoint takes a `path`, sandboxed by scan_roots_allowlist). Returns tags above general_thr (default 0.35) / character_thr (default 0.85)."
     config_fields: ["model_id (validated against a known-model allowlist, see check_model_id)", "path", "general_thr", "character_thr"]
     model_source: "AppState.wd_cache_dir (CLI --wd-cache-dir, required, no default) — caches loaded models in AppState.wd_infer keyed by model_id."
-    related_code: "yu-infer/src/router.rs::infer_wd, infer-core/src/engine.rs (WdInferEngine), infer-core/src/tags.rs"
+    related_code: "yu-hailo-infer/src/router.rs::infer_wd, yu-hailo-infer-core/src/engine.rs (WdInferEngine), yu-hailo-infer-core/src/tags.rs"
 
   - name: yolo_detect
     endpoints: ["GET /v1/infer/yolo/metadata", "GET /v1/infer/yolo/smoke-zero", "POST /v1/infer/yolo/detect"]
     auth_required: true
-    purpose: "Object detection. /detect takes a base64 image, runs the HEF, and does NMS + grid/stride decode (or parses HEF-embedded NMS output) server-side — see infer-core/src/yolo_postprocess.rs for the decode math. /metadata reports the HEF's input/output tensor shapes. /smoke-zero runs a single all-zero frame through the model as a cheap 'does the device/HEF even load' check."
+    purpose: "Object detection. /detect takes a base64 image, runs the HEF, and does NMS + grid/stride decode (or parses HEF-embedded NMS output) server-side — see yu-hailo-infer-core/src/yolo_postprocess.rs for the decode math. /metadata reports the HEF's input/output tensor shapes. /smoke-zero runs a single all-zero frame through the model as a cheap 'does the device/HEF even load' check."
     hef_resolution: "request body `hef_path` override, else $HAILO_YOLO_HEF env var, else $HOME/hailo_models/yolov8n.hef"
-    caveat: "labels are COCO-80 (infer-core/src/yolo_labels.rs) — a HEF trained on different classes will produce COCO label strings that don't match its actual output classes; this is not validated at runtime."
-    related_code: "yu-infer/src/router.rs (yolo_metadata, yolo_smoke_zero, yolo_detect), yu-infer/src/hailort/yolo.rs, infer-core/src/yolo_postprocess.rs"
+    caveat: "labels are COCO-80 (yu-hailo-infer-core/src/yolo_labels.rs) — a HEF trained on different classes will produce COCO label strings that don't match its actual output classes; this is not validated at runtime."
+    related_code: "yu-hailo-infer/src/router.rs (yolo_metadata, yolo_smoke_zero, yolo_detect), yu-hailo-infer/src/hailort/yolo.rs, yu-hailo-infer-core/src/yolo_postprocess.rs"
 
   - name: clip_image
     endpoints: ["POST /v1/infer/clip-image"]
     auth_required: true
     purpose: "CLIP image embedding. Base64 image in, dequantized + L2-normalized float embedding out. Runs on HailoRT (the image encoder is a Hailo HEF)."
     hef_resolution: "request body `hef_path` override, else $HAILO_CLIP_HEF env var, else $HOME/hailo_models/clip_vit_b_16_image_encoder.hef"
-    related_code: "yu-infer/src/router.rs::clip_image, yu-infer/src/hailort/clip.rs"
+    related_code: "yu-hailo-infer/src/router.rs::clip_image, yu-hailo-infer/src/hailort/clip.rs"
 
   - name: clip_text
     endpoints: ["POST /v1/infer/clip-text"]
     auth_required: true
     purpose: "CLIP text embedding. Runs on ONNX Runtime (`ort` crate), NOT HailoRT — the text encoder is not a Hailo HEF in this setup, unlike every other feature in this file. BPE tokenize is capped at a 77-token contract (CLIP's fixed context length)."
     model_resolution: "request body `model_dir` override, else $HAILO_CLIP_TEXT_MODEL_DIR env var, else $HOME/.cache/yu_ai_manager/clip_onnx/Xenova_clip-vit-base-patch16"
-    related_code: "yu-infer/src/router.rs::clip_text, infer-core/src/clip_text.rs"
+    related_code: "yu-hailo-infer/src/router.rs::clip_text, yu-hailo-infer-core/src/clip_text.rs"
 
   - name: llm
     endpoints: ["POST /v1/infer/llm/tokenize", "POST /v1/infer/llm/generate", "POST /v1/infer/llm/generate/stream"]
@@ -123,7 +123,7 @@ features:
     purpose: "Text-only LLM generation via HailoRT genai. /generate is a blocking single-response call; /generate/stream returns Server-Sent Events (one `data:` event per token, `x-accel-buffering: no` header set so reverse proxies don't buffer it)."
     generation_params: ["temperature", "top_p", "top_k", "frequency_penalty", "max_generated_tokens (capped at MAX_LLM_GENERATED_TOKENS=4096)", "do_sample", "seed"]
     hef_resolution: "request body `hef_path` override, else $HAILO_LLM_HEF env var, else $HOME/hailo_models/Llama3.2-1B-Instruct.hef"
-    related_code: "yu-infer/src/router.rs (llm_tokenize, llm_generate, llm_generate_stream), yu-infer/src/hailort/llm.rs"
+    related_code: "yu-hailo-infer/src/router.rs (llm_tokenize, llm_generate, llm_generate_stream), yu-hailo-infer/src/hailort/llm.rs"
 
   - name: vlm
     endpoints: ["POST /v1/infer/vlm/generate", "POST /v1/infer/vlm/generate/stream"]
@@ -131,7 +131,7 @@ features:
     purpose: "Vision-language generation, but TEXT-ONLY chat despite the name — image-attached chat is NOT supported (see caveat). Accepts up to MAX_FRAMES=8 base64 image frames per request for whatever image-conditioning the HEF itself does internally; behaves like llm's streaming/non-streaming pair otherwise."
     caveat: "README/docs describe this as 'text-only, image-attached chat not supported' — verify against the actual HEF's capabilities before assuming frames are used the way a typical multimodal chat API would use them."
     hef_resolution: "request body `hef_path` override, else $HAILO_VLM_HEF env var, else $HOME/hailo_models/qwen2-vl-2b-instruct.hef"
-    related_code: "yu-infer/src/router.rs (vlm_generate, vlm_generate_stream, validate_and_decode_vlm_input), yu-infer/src/hailort/vlm.rs"
+    related_code: "yu-hailo-infer/src/router.rs (vlm_generate, vlm_generate_stream, validate_and_decode_vlm_input), yu-hailo-infer/src/hailort/vlm.rs"
 
   - name: speech2text
     endpoints: ["POST /v1/infer/speech2text/tokenize", "POST /v1/infer/speech2text/transcribe"]
@@ -140,7 +140,7 @@ features:
     task_param: "\"transcribe\" (default) or \"translate\""
     audio_format_constraint: "WAV only (PCM 16-bit int or float32). No mp3/flac/ogg support — by design, see spec's scope exclusions."
     hef_resolution: "request body `hef_path` override, else $HAILO_S2T_HEF env var, else $HOME/hailo_models/Whisper-Tiny.hef"
-    related_code: "yu-infer/src/speech2text_route.rs (TranscribeRequest, decode_base64_wav, speech2text_transcribe_route), yu-infer/src/hailort/speech2text.rs"
+    related_code: "yu-hailo-infer/src/speech2text_route.rs (TranscribeRequest, decode_base64_wav, speech2text_transcribe_route), yu-hailo-infer/src/hailort/speech2text.rs"
     related_docs: ["docs/superpowers/specs/2026-07-20-speech2text-transcribe-design.md"]
 
   - name: startup_contract
@@ -153,14 +153,14 @@ features:
       the caller/orchestrator injects the bearer token and the initial
       scan_roots allowlist — there is no `--bearer-token` or
       `--scan-roots` CLI flag (see meta.known_staleness_warning above).
-    example: 'echo ''{"instance_id":"inst-1","scan_roots":["/data/images"],"auth_token":"<random-secret>"}'' | ./target/release/yu-infer --port 8100 --wd-cache-dir /var/cache/yu-infer-wd'
-    related_code: "yu-infer/src/startup.rs (read_startup_contract), yu-infer/src/lib.rs::run"
+    example: 'echo ''{"instance_id":"inst-1","scan_roots":["/data/images"],"auth_token":"<random-secret>"}'' | ./target/release/yu-hailo-infer --port 8100 --wd-cache-dir /var/cache/yu-infer-wd'
+    related_code: "yu-hailo-infer/src/startup.rs (read_startup_contract), yu-hailo-infer/src/lib.rs::run"
 
 deployment_topology:
   see: "TODO.md tracks writing a dedicated deployment doc; none exists yet."
   summary: >
     Single binary, single process, single Hailo-10H device (one physical
-    device -> one hailort_device_lock -> one yu-infer process; do not run
+    device -> one hailort_device_lock -> one yu-hailo-infer process; do not run
     two instances against the same device). CLI: `--port` (default 18771),
     `--wd-cache-dir` (required, no default — must be a writable directory).
     Auth/scan_roots come from stdin (see startup_contract feature). Model
@@ -174,10 +174,10 @@ deployment_topology:
 
 glossary:
   HEF: "Hailo Executable Format — the compiled model binary format HailoRT loads and runs on Hailo hardware. Not portable across Hailo device generations (Hailo-8 vs Hailo-10H) or usually across model architectures."
-  HailoRT: "Hailo's runtime SDK (C++, wrapped here via a cxx-based FFI shim — see yu-infer/src/hailort/ffi.rs, shim.cpp/shim.rs) for loading HEFs and running inference on Hailo devices."
+  HailoRT: "Hailo's runtime SDK (C++, wrapped here via a cxx-based FFI shim — see yu-hailo-infer/src/hailort/ffi.rs, shim.cpp/shim.rs) for loading HEFs and running inference on Hailo devices."
   genai: "HailoRT's higher-level API surface (hailort::genai namespace in the C++ SDK) for LLM/VLM/Speech2Text-style generative workloads, as opposed to the lower-level VStream API used for YOLO/CLIP-image."
   VDevice: "HailoRT's handle to a physical Hailo device; created once per Llm/Vlm/Speech2Text/etc. instance in this codebase (each request currently creates a fresh one rather than pooling — see hailort/*.rs `create()` methods)."
-  dequantize: "Converting a HEF's raw quantized (typically uint8) tensor output back to float using the HEF's embedded scale/zero-point metadata — see yu-infer/src/hailort/metadata.rs and infer-core/src/yolo_postprocess.rs for the two places this logic lives."
-  NMS: "Non-Maximum Suppression — the algorithm that collapses overlapping YOLO detection boxes down to one per object. Either done server-side in infer-core/src/yolo_postprocess.rs, or already baked into the HEF's own output (see is_nms_output detection in the same file)."
+  dequantize: "Converting a HEF's raw quantized (typically uint8) tensor output back to float using the HEF's embedded scale/zero-point metadata — see yu-hailo-infer/src/hailort/metadata.rs and yu-hailo-infer-core/src/yolo_postprocess.rs for the two places this logic lives."
+  NMS: "Non-Maximum Suppression — the algorithm that collapses overlapping YOLO detection boxes down to one per object. Either done server-side in yu-hailo-infer-core/src/yolo_postprocess.rs, or already baked into the HEF's own output (see is_nms_output detection in the same file)."
   scan_roots: "The startup-time (+ hot-reloadable) allowlist of filesystem path prefixes that WD-Tagger's `path` field is permitted to resolve under — see security_model.scan_roots_allowlist."
-  wd-tagger: "WD (Waifu Diffusion) Tagger — an anime/illustration image tagging model family; infer-core/src/tags.rs holds its tag vocabulary/categories."
+  wd-tagger: "WD (Waifu Diffusion) Tagger — an anime/illustration image tagging model family; yu-hailo-infer-core/src/tags.rs holds its tag vocabulary/categories."

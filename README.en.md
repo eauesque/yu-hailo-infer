@@ -1,4 +1,4 @@
-# hailo-infer
+# yu-hailo-infer
 English | [日本語](README.md)
 
 Rust native inference microservice for Hailo-10H. Exposes CLIP embeddings, WD-Tagger tag inference, LLM generation, VLM text generation, and YOLO object detection via HTTP.
@@ -32,12 +32,12 @@ Rust native inference microservice for Hailo-10H. Exposes CLIP embeddings, WD-Ta
 ## Quick Start
 
 ```bash
-cargo build --release -p yu-infer
+cargo build --release -p yu-hailo-infer
 
 # auth_token / scan_roots / instance_id are not CLI arguments, but passed to stdin at startup
 # as JSON ("startup contract"). --port defaults to 18771; --wd-cache-dir is required.
 echo '{"instance_id":"local-dev","scan_roots":["/data/images"],"auth_token":"<token>"}' \
-  | ./target/release/yu-infer --port 8100 --wd-cache-dir /var/cache/yu-infer-wd
+  | ./target/release/yu-hailo-infer --port 8100 --wd-cache-dir /var/cache/yu-infer-wd
 ```
 
 ```bash
@@ -56,7 +56,7 @@ There is also `docs/ai-reference.yaml`, an AI-facing reference covering configur
 > "Read `docs-index.yaml`, then read the code at the `path` listed in the relevant entry, and explain <your question>."
 
 Examples:
-> "Check `docs-index.yaml`, then explain how the YOLO detection NMS/decoding implementation works (`infer-core/src/yolo_postprocess.rs`)"
+> "Check `docs-index.yaml`, then explain how the YOLO detection NMS/decoding implementation works (`yu-hailo-infer-core/src/yolo_postprocess.rs`)"
 > "Look at `docs-index.yaml`, then tell me where the CLIP image embedding dequantize processing is"
 
 ## License

@@ -1,4 +1,4 @@
-# hailo-infer コードインデックス(LLM向け)
+# yu-hailo-infer コードインデックス(LLM向け)
 #
 # 人間向けの長文ドキュメントの代わりに、このファイルはコードファイルへの
 # ポインタのみを持つ。実装との二重管理によるドリフトを避けるため、各エントリの
@@ -15,113 +15,113 @@
 schema: HAILO_INFER_DOCS_INDEX_V1
 
 entries:
-  - path: yu-infer/src/router.rs
+  - path: yu-hailo-infer/src/router.rs
     purpose: HTTPエンドポイント定義(axum router)。全`/v1/infer/*`ルートのハンドラ結線・認証ミドルウェア適用箇所。
     key_symbols: [build_router, healthz, yolo_detect, clip_image, clip_text, llm_generate, vlm_generate]
     when_to_read: "エンドポイント一覧・リクエスト/レスポンス形式・認証方式について聞かれた時"
 
-  - path: yu-infer/src/main.rs
-    purpose: バイナリのエントリポイント。tracing初期化とyu_infer::run()呼び出しのみの薄いシム(実体はlib.rs)。
+  - path: yu-hailo-infer/src/main.rs
+    purpose: バイナリのエントリポイント。tracing初期化とyu_hailo_infer::run()呼び出しのみの薄いシム(実体はlib.rs)。
     key_symbols: [main]
     when_to_read: "バイナリの起動フロー全体像について聞かれた時"
 
-  - path: yu-infer/src/lib.rs
+  - path: yu-hailo-infer/src/lib.rs
     purpose: サービス本体。CLI引数(--port・--wd-cache-dir)のパース(clap)、startup.rs経由のstdin起動契約読み込み、AppState構築、サーバ起動。bearer tokenはCLI引数ではなくstdin契約由来(docs/ai-reference.yaml参照)。
     key_symbols: [Cli, run]
     when_to_read: "起動オプション・環境変数・CLI引数・認証トークンの受け渡し方法について聞かれた時"
 
-  - path: yu-infer/src/startup.rs
+  - path: yu-hailo-infer/src/startup.rs
     purpose: stdinから起動契約JSON(instance_id・scan_roots・auth_token)を読み込みパースする処理。HailoRTデバイス初期化はここでは行わない。
     key_symbols: [read_startup_contract, StartupContract]
     when_to_read: "起動契約の形式・auth_tokenの受け渡し方法・起動失敗について聞かれた時"
 
-  - path: yu-infer/src/hailort/mod.rs
+  - path: yu-hailo-infer/src/hailort/mod.rs
     purpose: HailoRT関連モジュールの集約。各推論プリミティブ(yolo/clip/llm/vlm/speech2text)の親モジュール。
     key_symbols: []
     when_to_read: "HailoRT統合の全体構成について聞かれた時"
 
-  - path: yu-infer/src/hailort/ffi.rs
+  - path: yu-hailo-infer/src/hailort/ffi.rs
     purpose: HailoRT C++ SDKへのFFIバインディング宣言(cxx crate経由)。
     key_symbols: []
     when_to_read: "C++層とのインターフェース・FFI呼び出し規約について聞かれた時"
 
-  - path: yu-infer/src/hailort/shim.rs
+  - path: yu-hailo-infer/src/hailort/shim.rs
     purpose: FFI層をRustから安全に呼び出すためのラッパー(shim.cpp/shim.hに対応するRust側)。
     key_symbols: []
     when_to_read: "HEF推論の実行方法・デバイス排他制御について聞かれた時"
 
-  - path: yu-infer/src/hailort/safe.rs
+  - path: yu-hailo-infer/src/hailort/safe.rs
     purpose: shim層をさらにラップした安全なRust API(unsafe境界の集約)。
     key_symbols: []
     when_to_read: "メモリ安全性・unsafeコードの範囲について聞かれた時"
 
-  - path: yu-infer/src/hailort/yolo.rs
-    purpose: YOLO HEF推論プリミティブ(量子化テンソル出力の取得)。NMS/デコード自体は`infer-core/src/yolo_postprocess.rs`参照。
+  - path: yu-hailo-infer/src/hailort/yolo.rs
+    purpose: YOLO HEF推論プリミティブ(量子化テンソル出力の取得)。NMS/デコード自体は`yu-hailo-infer-core/src/yolo_postprocess.rs`参照。
     key_symbols: []
     when_to_read: "YOLO推論の生出力形式・HEF読み込みについて聞かれた時"
 
-  - path: yu-infer/src/hailort/clip.rs
+  - path: yu-hailo-infer/src/hailort/clip.rs
     purpose: CLIP画像/テキストエンコーダのHailoRT/ONNX推論実行、dequantize+L2正規化。
     key_symbols: []
     when_to_read: "CLIP embeddingの生成方法・次元数・正規化処理について聞かれた時"
 
-  - path: yu-infer/src/hailort/llm.rs
+  - path: yu-hailo-infer/src/hailort/llm.rs
     purpose: LLM推論(tokenize/generate/ストリーミング生成)のHailoRT呼び出し。
     key_symbols: []
     when_to_read: "LLM生成のサンプリングパラメータ・ストリーミング実装について聞かれた時"
 
-  - path: yu-infer/src/hailort/vlm.rs
+  - path: yu-hailo-infer/src/hailort/vlm.rs
     purpose: VLM(テキストのみ)生成のHailoRT呼び出し。画像添付は非対応。
     key_symbols: []
     when_to_read: "VLM生成の対応範囲・画像入力が使えない理由について聞かれた時"
 
-  - path: yu-infer/src/hailort/speech2text.rs
+  - path: yu-hailo-infer/src/hailort/speech2text.rs
     purpose: 音声認識のtokenize・文字起こし生成処理。HTTP経由のWAVデコードとtranscribeルートはspeech2text_route.rsが担当。
     key_symbols: []
     when_to_read: "speech2textの推論処理・対応範囲について聞かれた時"
 
-  - path: yu-infer/src/speech2text_route.rs
+  - path: yu-hailo-infer/src/speech2text_route.rs
     purpose: speech2text/transcribe HTTPルート。base64 WAVデコード、16 kHzモノラルへの変換、入力検証、HailoRT文字起こし呼び出しを実装。
     key_symbols: [TranscribeRequest, decode_base64_wav, speech2text_transcribe_route]
     when_to_read: "speech2textのHTTP API・音声形式・デコードエラー・transcribeルートについて聞かれた時"
 
-  - path: yu-infer/src/hailort/metadata.rs
+  - path: yu-hailo-infer/src/hailort/metadata.rs
     purpose: HEFファイルのメタデータ(入出力shape・量子化パラメータ)読み取り。
     key_symbols: []
     when_to_read: "HEFメタデータの読み方・モデル入出力形状の確認方法について聞かれた時"
 
-  - path: infer-core/src/engine.rs
+  - path: yu-hailo-infer-core/src/engine.rs
     purpose: WD-Tagger推論エンジン(WdInferEngine)。threshold処理・タグ付け結果の組み立てを含む。
     key_symbols: [WdInferEngine]
     when_to_read: "WD-Tagger推論の閾値処理・出力形式について聞かれた時"
 
-  - path: infer-core/src/tags.rs
+  - path: yu-hailo-infer-core/src/tags.rs
     purpose: WD-Taggerのタグ辞書・カテゴリ定義。
     key_symbols: []
     when_to_read: "WD-Taggerのタグ分類・カテゴリ体系について聞かれた時"
 
-  - path: infer-core/src/clip_text.rs
+  - path: yu-hailo-infer-core/src/clip_text.rs
     purpose: CLIPテキストエンコーダのBPEトークナイズ(tokenizers crate利用)・77トークン契約。
     key_symbols: []
     when_to_read: "CLIPテキスト入力のトークナイズ・最大長制限について聞かれた時"
 
-  - path: infer-core/src/yolo_postprocess.rs
+  - path: yu-hailo-infer-core/src/yolo_postprocess.rs
     purpose: YOLO検出のNMS(Non-Maximum Suppression)・グリッド/ストライド相対デコード・HEF内蔵NMS出力パース。量子化解除ロジックを含む。
     key_symbols: []
     when_to_read: "YOLO検出のNMSアルゴリズム・座標デコード方式・信頼度計算について聞かれた時"
 
-  - path: infer-core/src/yolo_labels.rs
+  - path: yu-hailo-infer-core/src/yolo_labels.rs
     purpose: YOLOモデルのクラスラベル定義(COCO等)。
     key_symbols: []
     when_to_read: "YOLOの検出クラス一覧・クラスIDの対応関係について聞かれた時"
 
-  - path: infer-core/src/error.rs
-    purpose: infer-core全体で使うエラー型定義。
+  - path: yu-hailo-infer-core/src/error.rs
+    purpose: yu-hailo-infer-core全体で使うエラー型定義。
     key_symbols: []
     when_to_read: "推論エラーの種類・エラーハンドリング方針について聞かれた時"
 
-  - path: auth-core/src/lib.rs
-    purpose: bearer token認証の共有ロジック(constant-time比較を含む)。yu-infer全エンドポイントの認証に使用。
+  - path: yu-hailo-auth/src/lib.rs
+    purpose: bearer token認証の共有ロジック(constant-time比較を含む)。yu-hailo-infer全エンドポイントの認証に使用。
     key_symbols: []
     when_to_read: "認証方式・トークン検証について聞かれた時"
 

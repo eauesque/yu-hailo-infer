@@ -1,0 +1,15 @@
+[package]
+name        = "yu-hailo-auth"
+description = "Constant-time bearer-token generation and verification for the yu-hailo-infer sidecar."
+keywords    = ["auth", "bearer", "token", "hailo"]
+categories  = ["authentication"]
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+authors.workspace    = true
+
+[dependencies]
+rand   = { workspace = true }
+subtle = { workspace = true }
+hex    = { workspace = true }
