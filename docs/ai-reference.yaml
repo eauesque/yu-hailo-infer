@@ -1,0 +1,183 @@
+meta:
+  purpose: >
+    Machine-readable endpoint/config/behavior catalog for AI agents
+    configuring, debugging, calling, or extending hailo-infer without full
+    session context. Complements (does not replace) README.md (human
+    narrative overview) and docs-index.yaml (pointers into the actual code
+    — read that when you need to see or change an implementation, not just
+    call it). Read this file first to know WHAT the service exposes and
+    WHY it behaves the way it does; read docs-index.yaml + the referenced
+    source when you need exact code-level detail.
+  last_updated: "2026-07-20"
+  audience: "AI agents (Claude Code, Codex, etc.) doing setup/config/debug/integration work on this repo — not written for human readers"
+  known_staleness_warning: >
+    README.md's "Quick Start" curl/CLI example is outdated as of the
+    speech2text work (2026-07-20): it shows `--bearer-token <token>` as a
+    CLI flag, but the actual binary only accepts `--port` and
+    `--wd-cache-dir` on the CLI (see yu_infer::Cli in yu-infer/src/lib.rs).
+    auth_token / scan_roots / instance_id are supplied via a JSON "startup
+    contract" written to the process's stdin (see startup_contract feature
+    below) — there is no CLI flag for the bearer token. Fix tracked in
+    TODO.md; until it's fixed, trust this file's `deployment_topology`
+    section over README.md's Quick Start.
+
+philosophy:
+  - "inference-only scope: this crate serves model inference over HTTP and nothing else. Vector search, index building (e.g. usearch), and persistent storage (DB) are explicitly out of scope — that's the calling application's job. Do not add such features here even if a caller would find it convenient."
+  - "danger-first evaluation (see docs/NAME_ORIGIN/COVENANT.md, a philosophy doc shared across multiple repos by the same author): every new input surface (base64 payload, path, HEF override) is designed by asking 'what could a malicious/malformed input do here' before 'what does a well-behaved caller send.'"
+  - "single-device serialization: ALL HailoRT inference calls across ALL endpoints share one process-wide Mutex (hailort_device_lock in router.rs). There is exactly one physical Hailo-10H device; the lock exists so concurrent HTTP requests don't race on it. This means throughput across DIFFERENT endpoints is also serialized, not just within one endpoint — a slow LLM generation blocks a concurrent YOLO detect request on the same process."
+  - "fail-closed on auth, fail-loud otherwise: missing/invalid bearer token -> 401 before any handler logic runs, on every endpoint. Decode/validation failures return a structured 4xx (see response_envelope below) rather than panicking or silently returning empty/wrong data. There is no fail-open feature-degradation behavior in this codebase, unlike some other repos by this author — every error is surfaced to the caller."
+  - "DoS-hardening pattern (see speech2text_transcribe as the canonical recent example, docs/superpowers/specs/2026-07-20-speech2text-transcribe-design.md): base64/decoded-size limits are checked BEFORE the expensive decode/allocation happens, not after. When adding a new endpoint that decodes a client-supplied payload (image, audio, etc.), follow this same order: (1) reject on raw encoded size, (2) decode, (3) reject on decoded/projected size using checked arithmetic BEFORE any resampling/resizing allocation, (4) do the expensive work."
+  - "GPL/LGPL/AGPL dependencies are prohibited (see CLAUDE.md). Check license before adding any new crate."
+  - "no PR workflow: direct commits to main via `git merge <branch> && git push`. `gh pr create` is prohibited unless a human explicitly asks for a PR."
+
+security_model:
+  trust_boundary: >
+    Every request body field that resolves to a filesystem path is either
+    (a) fully caller-controlled but sandboxed by a startup-time allowlist
+    (WD-Tagger's `path` — see scan_roots below), or (b) a HEF model path
+    override (`hef_path` / `model_dir` on most endpoints) that is NOT
+    sandboxed — a caller who can reach this service can make the HailoRT
+    SDK / ONNX runtime open an arbitrary file path on the host. This is by
+    design (the service assumes callers are trusted, same-host or
+    same-network processes, not the public internet) but means: NEVER
+    expose this service directly to an untrusted network without a
+    reverse-proxy/gateway in front that restricts who can call it. See
+    auth_model below for the one enforced boundary (bearer token).
+  auth_model:
+    mechanism: "Authorization: Bearer <token> header on every /v1/infer/* and /_internal/* route. Verified via auth-core::verify_token (constant-time comparison, subtle crate) against AppState.auth_token, which comes from the startup contract (stdin JSON), not a CLI flag or env var."
+    failure_response: >
+      401 Unauthorized with body `{"error": "invalid auth token"}` — NOTE:
+      this shape does NOT match the normal api_error envelope
+      (`{"ok":false,"error":"<code>","message":"..."}`, see
+      response_envelope below). Auth failures are the one endpoint-family
+      response that doesn't go through api_error(). If you're writing a
+      client, handle both shapes.
+    exempt_routes: ["GET /healthz"]
+  scan_roots_allowlist:
+    purpose: "WD-Tagger's infer_wd endpoint takes an arbitrary `path` field. check_scan_roots() requires the canonicalized path to start with one of AppState.scan_roots (populated at startup from the startup contract, updatable at runtime via POST /_internal/scan-roots-changed) — this is the ONLY path-traversal guard in the service; it applies to infer_wd only, not to hef_path/model_dir overrides on other endpoints (see trust_boundary above)."
+  request_size_hardening:
+    pattern: "decode-order DoS guards (see philosophy.DoS-hardening pattern)"
+    known_limits:
+      - "images (clip-image, vlm frames): MAX_FRAME_BASE64_BYTES = 8 MiB per frame, MAX_TOTAL_DECODED_IMAGE_BYTES = 64 MiB shared budget across all frames in one request, MAX_DECODED_IMAGE_DIMENSION = 4096px (decompression-bomb guard)."
+      - "audio (speech2text/transcribe): MAX_AUDIO_BASE64_BYTES = 32 MiB, MAX_AUDIO_SAMPLES = 16000*600 (10 min at 16kHz), projected-length checked BEFORE resampling allocates (see docs/superpowers/specs/2026-07-20-speech2text-transcribe-design.md for the exact attack this defends against)."
+      - "text fields: MAX_TEXT_BYTES / MAX_PROMPT_BYTES = 16 KiB."
+    known_gap: >
+      axum's DefaultBodyLimit is NOT raised globally (default 2 MiB) — only
+      the speech2text/transcribe route has a route-scoped override. Other
+      multi-frame endpoints (vlm/generate with up to MAX_FRAMES=8 images)
+      can theoretically exceed 2 MiB and get a generic 413 before reaching
+      their own more-specific validation. Tracked in TODO.md, not yet
+      fixed.
+
+response_envelope:
+  success: '{"ok": true, "error": null, "data": {...}}  (api_ok())'
+  error: '{"ok": false, "error": "<snake_case_code>", "message": "human-readable string"}  (api_error(), HTTP status varies by code — see each feature entry)'
+  auth_failure_exception: '401 responses use {"error": "invalid auth token"} instead — see security_model.auth_model.failure_response'
+
+features:
+  - name: healthz
+    endpoints: ["GET /healthz"]
+    auth_required: false
+    purpose: "Liveness probe. Returns {ok: true, uptime_seconds, instance_id}."
+    related_code: "yu-infer/src/router.rs::healthz"
+
+  - name: scan_roots_hot_reload
+    endpoints: ["POST /_internal/scan-roots-changed"]
+    auth_required: true
+    purpose: "Lets the operator push an updated scan_roots allowlist at runtime without restarting the process (paths are canonicalized on receipt). Intended for internal/operator use, not end-user clients."
+    related_code: "yu-infer/src/router.rs::scan_roots_changed"
+
+  - name: wd_tagger
+    endpoints: ["POST /v1/infer/wd"]
+    auth_required: true
+    purpose: "WD-Tagger anime/illustration tagging on an image file already present on disk (NOT a base64 upload — this endpoint takes a `path`, sandboxed by scan_roots_allowlist). Returns tags above general_thr (default 0.35) / character_thr (default 0.85)."
+    config_fields: ["model_id (validated against a known-model allowlist, see check_model_id)", "path", "general_thr", "character_thr"]
+    model_source: "AppState.wd_cache_dir (CLI --wd-cache-dir, required, no default) — caches loaded models in AppState.wd_infer keyed by model_id."
+    related_code: "yu-infer/src/router.rs::infer_wd, infer-core/src/engine.rs (WdInferEngine), infer-core/src/tags.rs"
+
+  - name: yolo_detect
+    endpoints: ["GET /v1/infer/yolo/metadata", "GET /v1/infer/yolo/smoke-zero", "POST /v1/infer/yolo/detect"]
+    auth_required: true
+    purpose: "Object detection. /detect takes a base64 image, runs the HEF, and does NMS + grid/stride decode (or parses HEF-embedded NMS output) server-side — see infer-core/src/yolo_postprocess.rs for the decode math. /metadata reports the HEF's input/output tensor shapes. /smoke-zero runs a single all-zero frame through the model as a cheap 'does the device/HEF even load' check."
+    hef_resolution: "request body `hef_path` override, else $HAILO_YOLO_HEF env var, else $HOME/hailo_models/yolov8n.hef"
+    caveat: "labels are COCO-80 (infer-core/src/yolo_labels.rs) — a HEF trained on different classes will produce COCO label strings that don't match its actual output classes; this is not validated at runtime."
+    related_code: "yu-infer/src/router.rs (yolo_metadata, yolo_smoke_zero, yolo_detect), yu-infer/src/hailort/yolo.rs, infer-core/src/yolo_postprocess.rs"
+
+  - name: clip_image
+    endpoints: ["POST /v1/infer/clip-image"]
+    auth_required: true
+    purpose: "CLIP image embedding. Base64 image in, dequantized + L2-normalized float embedding out. Runs on HailoRT (the image encoder is a Hailo HEF)."
+    hef_resolution: "request body `hef_path` override, else $HAILO_CLIP_HEF env var, else $HOME/hailo_models/clip_vit_b_16_image_encoder.hef"
+    related_code: "yu-infer/src/router.rs::clip_image, yu-infer/src/hailort/clip.rs"
+
+  - name: clip_text
+    endpoints: ["POST /v1/infer/clip-text"]
+    auth_required: true
+    purpose: "CLIP text embedding. Runs on ONNX Runtime (`ort` crate), NOT HailoRT — the text encoder is not a Hailo HEF in this setup, unlike every other feature in this file. BPE tokenize is capped at a 77-token contract (CLIP's fixed context length)."
+    model_resolution: "request body `model_dir` override, else $HAILO_CLIP_TEXT_MODEL_DIR env var, else $HOME/.cache/yu_ai_manager/clip_onnx/Xenova_clip-vit-base-patch16"
+    related_code: "yu-infer/src/router.rs::clip_text, infer-core/src/clip_text.rs"
+
+  - name: llm
+    endpoints: ["POST /v1/infer/llm/tokenize", "POST /v1/infer/llm/generate", "POST /v1/infer/llm/generate/stream"]
+    auth_required: true
+    purpose: "Text-only LLM generation via HailoRT genai. /generate is a blocking single-response call; /generate/stream returns Server-Sent Events (one `data:` event per token, `x-accel-buffering: no` header set so reverse proxies don't buffer it)."
+    generation_params: ["temperature", "top_p", "top_k", "frequency_penalty", "max_generated_tokens (capped at MAX_LLM_GENERATED_TOKENS=4096)", "do_sample", "seed"]
+    hef_resolution: "request body `hef_path` override, else $HAILO_LLM_HEF env var, else $HOME/hailo_models/Llama3.2-1B-Instruct.hef"
+    related_code: "yu-infer/src/router.rs (llm_tokenize, llm_generate, llm_generate_stream), yu-infer/src/hailort/llm.rs"
+
+  - name: vlm
+    endpoints: ["POST /v1/infer/vlm/generate", "POST /v1/infer/vlm/generate/stream"]
+    auth_required: true
+    purpose: "Vision-language generation, but TEXT-ONLY chat despite the name — image-attached chat is NOT supported (see caveat). Accepts up to MAX_FRAMES=8 base64 image frames per request for whatever image-conditioning the HEF itself does internally; behaves like llm's streaming/non-streaming pair otherwise."
+    caveat: "README/docs describe this as 'text-only, image-attached chat not supported' — verify against the actual HEF's capabilities before assuming frames are used the way a typical multimodal chat API would use them."
+    hef_resolution: "request body `hef_path` override, else $HAILO_VLM_HEF env var, else $HOME/hailo_models/qwen2-vl-2b-instruct.hef"
+    related_code: "yu-infer/src/router.rs (vlm_generate, vlm_generate_stream, validate_and_decode_vlm_input), yu-infer/src/hailort/vlm.rs"
+
+  - name: speech2text
+    endpoints: ["POST /v1/infer/speech2text/tokenize", "POST /v1/infer/speech2text/transcribe"]
+    auth_required: true
+    purpose: "Whisper-family speech-to-text via HailoRT genai. /transcribe accepts a base64 WAV file (server-side decoded: mono-mixed, linearly resampled to 16 kHz, sanitized against NaN/Inf samples — see decode_base64_wav) and returns transcribed/translated text. /tokenize is a plain text tokenizer call, unrelated to actual audio."
+    task_param: "\"transcribe\" (default) or \"translate\""
+    audio_format_constraint: "WAV only (PCM 16-bit int or float32). No mp3/flac/ogg support — by design, see spec's scope exclusions."
+    hef_resolution: "request body `hef_path` override, else $HAILO_S2T_HEF env var, else $HOME/hailo_models/Whisper-Tiny.hef"
+    related_code: "yu-infer/src/speech2text_route.rs (TranscribeRequest, decode_base64_wav, speech2text_transcribe_route), yu-infer/src/hailort/speech2text.rs"
+    related_docs: ["docs/superpowers/specs/2026-07-20-speech2text-transcribe-design.md"]
+
+  - name: startup_contract
+    config_section: "stdin JSON, not CLI flags or env vars"
+    purpose: >
+      The process reads one JSON object from stdin at startup (blocking —
+      the process will hang waiting for stdin if none is piped) with
+      fields {instance_id: string, scan_roots: [string], auth_token:
+      string}. auth_token must be non-empty or startup fails. This is how
+      the caller/orchestrator injects the bearer token and the initial
+      scan_roots allowlist — there is no `--bearer-token` or
+      `--scan-roots` CLI flag (see meta.known_staleness_warning above).
+    example: 'echo ''{"instance_id":"inst-1","scan_roots":["/data/images"],"auth_token":"<random-secret>"}'' | ./target/release/yu-infer --port 8100 --wd-cache-dir /var/cache/yu-infer-wd'
+    related_code: "yu-infer/src/startup.rs (read_startup_contract), yu-infer/src/lib.rs::run"
+
+deployment_topology:
+  see: "TODO.md tracks writing a dedicated deployment doc; none exists yet."
+  summary: >
+    Single binary, single process, single Hailo-10H device (one physical
+    device -> one hailort_device_lock -> one yu-infer process; do not run
+    two instances against the same device). CLI: `--port` (default 18771),
+    `--wd-cache-dir` (required, no default — must be a writable directory).
+    Auth/scan_roots come from stdin (see startup_contract feature). Model
+    weights (HEF files, ONNX CLIP text model) are resolved per-request via
+    optional body overrides, falling back to $HAILO_<MODALITY>_HEF /
+    $HAILO_CLIP_TEXT_MODEL_DIR env vars, falling back to fixed paths under
+    $HOME/hailo_models/ (or $HOME/.cache/yu_ai_manager/clip_onnx/ for the
+    CLIP text ONNX model) — there is no bundled model download step in
+    this crate; models must already exist on disk before a request that
+    needs them.
+
+glossary:
+  HEF: "Hailo Executable Format — the compiled model binary format HailoRT loads and runs on Hailo hardware. Not portable across Hailo device generations (Hailo-8 vs Hailo-10H) or usually across model architectures."
+  HailoRT: "Hailo's runtime SDK (C++, wrapped here via a cxx-based FFI shim — see yu-infer/src/hailort/ffi.rs, shim.cpp/shim.rs) for loading HEFs and running inference on Hailo devices."
+  genai: "HailoRT's higher-level API surface (hailort::genai namespace in the C++ SDK) for LLM/VLM/Speech2Text-style generative workloads, as opposed to the lower-level VStream API used for YOLO/CLIP-image."
+  VDevice: "HailoRT's handle to a physical Hailo device; created once per Llm/Vlm/Speech2Text/etc. instance in this codebase (each request currently creates a fresh one rather than pooling — see hailort/*.rs `create()` methods)."
+  dequantize: "Converting a HEF's raw quantized (typically uint8) tensor output back to float using the HEF's embedded scale/zero-point metadata — see yu-infer/src/hailort/metadata.rs and infer-core/src/yolo_postprocess.rs for the two places this logic lives."
+  NMS: "Non-Maximum Suppression — the algorithm that collapses overlapping YOLO detection boxes down to one per object. Either done server-side in infer-core/src/yolo_postprocess.rs, or already baked into the HEF's own output (see is_nms_output detection in the same file)."
+  scan_roots: "The startup-time (+ hot-reloadable) allowlist of filesystem path prefixes that WD-Tagger's `path` field is permitted to resolve under — see security_model.scan_roots_allowlist."
+  wd-tagger: "WD (Waifu Diffusion) Tagger — an anime/illustration image tagging model family; infer-core/src/tags.rs holds its tag vocabulary/categories."

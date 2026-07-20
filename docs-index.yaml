@@ -6,6 +6,11 @@
 #
 # エージェントへの使い方: 「このYAMLを読み、該当pathのコードを実際に読んだ上で
 # 質問に答えてください」と指示する。
+#
+# エンドポイント仕様・設定(CLI/env var)・既知の癖(認証エラーのレスポンス形式差異等)を
+# 横断的にまとめたAI向けリファレンスは docs/ai-reference.yaml を参照(英語)。
+# このファイルはコードへのポインタのみ、docs/ai-reference.yamlは挙動・設計判断の説明、
+# README.mdは人間向けの概要、と役割が分かれている。
 
 schema: HAILO_INFER_DOCS_INDEX_V1
 
@@ -16,14 +21,19 @@ entries:
     when_to_read: "エンドポイント一覧・リクエスト/レスポンス形式・認証方式について聞かれた時"
 
   - path: yu-infer/src/main.rs
-    purpose: バイナリのエントリポイント。CLI引数(ポート・bearer token・HailoRTデバイスパス等)のパース、サーバ起動。
+    purpose: バイナリのエントリポイント。tracing初期化とyu_infer::run()呼び出しのみの薄いシム(実体はlib.rs)。
     key_symbols: [main]
-    when_to_read: "起動オプション・環境変数・CLI引数について聞かれた時"
+    when_to_read: "バイナリの起動フロー全体像について聞かれた時"
+
+  - path: yu-infer/src/lib.rs
+    purpose: サービス本体。CLI引数(--port・--wd-cache-dir)のパース(clap)、startup.rs経由のstdin起動契約読み込み、AppState構築、サーバ起動。bearer tokenはCLI引数ではなくstdin契約由来(docs/ai-reference.yaml参照)。
+    key_symbols: [Cli, run]
+    when_to_read: "起動オプション・環境変数・CLI引数・認証トークンの受け渡し方法について聞かれた時"
 
   - path: yu-infer/src/startup.rs
-    purpose: 起動時のHailoRTデバイス初期化・ヘルスチェック処理。
-    key_symbols: []
-    when_to_read: "起動失敗・デバイス初期化エラーについて聞かれた時"
+    purpose: stdinから起動契約JSON(instance_id・scan_roots・auth_token)を読み込みパースする処理。HailoRTデバイス初期化はここでは行わない。
+    key_symbols: [read_startup_contract, StartupContract]
+    when_to_read: "起動契約の形式・auth_tokenの受け渡し方法・起動失敗について聞かれた時"
 
   - path: yu-infer/src/hailort/mod.rs
     purpose: HailoRT関連モジュールの集約。各推論プリミティブ(yolo/clip/llm/vlm/speech2text)の親モジュール。

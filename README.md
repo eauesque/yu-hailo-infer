@@ -32,7 +32,11 @@ Hailo-10H向けRustネイティブ推論マイクロサービス。HTTP経由で
 
 ```bash
 cargo build --release -p yu-infer
-./target/release/yu-infer --port 8100 --bearer-token <token>
+
+# auth_token / scan_roots / instance_id はCLI引数ではなく、起動時にstdinへ
+# JSONで渡す(「起動契約」)。--port はデフォルト18771、--wd-cache-dirは必須。
+echo '{"instance_id":"local-dev","scan_roots":["/data/images"],"auth_token":"<token>"}' \
+  | ./target/release/yu-infer --port 8100 --wd-cache-dir /var/cache/yu-infer-wd
 ```
 
 ```bash
