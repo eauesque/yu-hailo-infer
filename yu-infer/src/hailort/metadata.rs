@@ -87,6 +87,7 @@ impl VStreamInfo {
 
 pub(crate) fn c_char_array_to_string<const N: usize>(value: &[c_char; N]) -> String {
     let nul = value.iter().position(|&ch| ch == 0).unwrap_or(N);
+    #[allow(clippy::unnecessary_cast)] // c_char is i8 on some platforms, u8 on others
     let bytes: Vec<u8> = value[..nul].iter().map(|&ch| ch as u8).collect();
     CStr::from_bytes_until_nul(&[bytes.as_slice(), &[0]].concat())
         .map(|s| s.to_string_lossy().into_owned())
