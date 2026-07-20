@@ -3,6 +3,10 @@ name = "yu-infer"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "yu_infer"
+path = "src/lib.rs"
+
 [[bin]]
 name = "yu-infer"
 path = "src/main.rs"
