@@ -25,7 +25,7 @@ Release history: [CHANGELOG.en.md](CHANGELOG.en.md). Unofficial — not affiliat
 
 ## Dependencies
 
-- Rust 1.88+ (to be verified; see `rust-version` in Cargo.toml for the actual toolchain version)
+- Rust: built and tested with 1.96.0. No MSRV is declared — older toolchains have not been verified, so the crates deliberately omit `rust-version`.
 - HailoRT SDK (version to be documented) — requires `hailort` shared library and headers
 - `ort` (ONNX Runtime bindings) — used for CLIP text encoder and WD-Tagger inference
 - `tokenizers` (Apache-2.0) — used for BPE tokenization of CLIP/LLM
