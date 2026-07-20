@@ -3,6 +3,8 @@ English | [日本語](README.md)
 
 Rust native inference microservice for Hailo-10H. Exposes CLIP embeddings, WD-Tagger tag inference, LLM generation, VLM text generation, and YOLO object detection via HTTP.
 
+Release history: [CHANGELOG.en.md](CHANGELOG.en.md). Unofficial — not affiliated with Hailo.
+
 ## Supported Features
 
 | Feature | Endpoint | Status |

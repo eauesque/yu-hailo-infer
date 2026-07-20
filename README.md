@@ -3,6 +3,8 @@
 
 Hailo-10H向けRustネイティブ推論マイクロサービス。HTTP経由でCLIP embedding・WD-Taggerタグ推論・LLM生成・VLMテキスト生成・YOLO物体検出を公開する。
 
+変更履歴: [CHANGELOG.md](CHANGELOG.md)。本プロジェクトは非公式であり、Hailo社との提携関係はない。
+
 ## 対応機能
 
 | 機能 | エンドポイント | 状態 |
