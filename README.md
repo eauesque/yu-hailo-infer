@@ -1,4 +1,5 @@
 # hailo-infer
+[English](README.en.md) | 日本語
 
 Hailo-10H向けRustネイティブ推論マイクロサービス。HTTP経由でCLIP embedding・WD-Taggerタグ推論・LLM生成・VLMテキスト生成・YOLO物体検出を公開する。
 
