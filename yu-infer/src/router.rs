@@ -29,6 +29,13 @@ const MAX_PROMPT_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_TIMEOUT_MS: u32 = 120_000;
 const MAX_FRAMES: usize = 8;
 const MAX_FRAME_BASE64_BYTES: usize = 8 * 1024 * 1024;
+/// axum's DefaultBodyLimit defaults to 2 MiB, which is below
+/// MAX_FRAME_BASE64_BYTES on its own; a request with MAX_FRAMES frames each
+/// near the per-frame cap would be rejected by axum before reaching this
+/// file's own (more specific, better-error-messaged) size checks. Routes
+/// that accept up to MAX_FRAMES base64 frames raise their body limit to
+/// this value (worst case: MAX_FRAMES frames + prompt + JSON overhead).
+const MAX_VLM_BODY_BYTES: usize = MAX_FRAMES * MAX_FRAME_BASE64_BYTES + MAX_PROMPT_BYTES + 4096;
 /// Upper bound accepted for a caller-supplied `max_generated_tokens`
 /// override. Prevents a client from requesting an unbounded-length
 /// generation that would hold the HailoRT device lock indefinitely.
@@ -63,8 +70,18 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/infer/wd", post(infer_wd))
         .route("/v1/infer/yolo/metadata", get(yolo_metadata))
         .route("/v1/infer/yolo/smoke-zero", get(yolo_smoke_zero))
-        .route("/v1/infer/yolo/detect", post(yolo_detect))
-        .route("/v1/infer/clip-image", post(clip_image))
+        .route(
+            "/v1/infer/yolo/detect",
+            post(yolo_detect).layer(axum::extract::DefaultBodyLimit::max(
+                MAX_FRAME_BASE64_BYTES + 4096,
+            )),
+        )
+        .route(
+            "/v1/infer/clip-image",
+            post(clip_image).layer(axum::extract::DefaultBodyLimit::max(
+                MAX_FRAME_BASE64_BYTES + 4096,
+            )),
+        )
         .route("/v1/infer/clip-text", post(clip_text))
         .route("/v1/infer/speech2text/tokenize", post(speech2text_tokenize))
         .route(
@@ -74,8 +91,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/infer/llm/tokenize", post(llm_tokenize))
         .route("/v1/infer/llm/generate", post(llm_generate))
         .route("/v1/infer/llm/generate/stream", post(llm_generate_stream))
-        .route("/v1/infer/vlm/generate", post(vlm_generate))
-        .route("/v1/infer/vlm/generate/stream", post(vlm_generate_stream))
+        .route(
+            "/v1/infer/vlm/generate",
+            post(vlm_generate).layer(axum::extract::DefaultBodyLimit::max(MAX_VLM_BODY_BYTES)),
+        )
+        .route(
+            "/v1/infer/vlm/generate/stream",
+            post(vlm_generate_stream)
+                .layer(axum::extract::DefaultBodyLimit::max(MAX_VLM_BODY_BYTES)),
+        )
         .with_state(state)
 }
 
@@ -1662,6 +1686,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn clip_image_body_between_axum_default_and_frame_cap_reaches_handler() {
+        // Regression test for the route-scoped DefaultBodyLimit fix: axum's
+        // own default body limit (2 MiB) is below MAX_FRAME_BASE64_BYTES (8
+        // MiB), so without a route-level override a body in that gap would
+        // be rejected by axum itself with a generic 413 before ever reaching
+        // this handler's own validation. Sending 4 MiB of garbage base64
+        // must reach decode_base64_image and fail there (400
+        // clip_image_invalid_image), not get stopped by axum's body limit.
+        let app = build_router(test_state(vec![]));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/infer/clip-image")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(
+                        json!({"image_base64": "A".repeat(4 * 1024 * 1024)}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

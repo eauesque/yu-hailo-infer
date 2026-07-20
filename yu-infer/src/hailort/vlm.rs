@@ -381,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires /dev/hailo0 and HAILO_VLM_HEF"]
+    #[ignore = "requires a Hailo device (/dev/hailo0 or /dev/h1x-0, depending on driver generation) and HAILO_VLM_HEF"]
     fn smoke_vlm_create_and_tokenize() {
         let hef = std::env::var("HAILO_VLM_HEF").expect("HAILO_VLM_HEF");
         let mut vlm = Vlm::create(&hef, false).expect("create vlm");
@@ -391,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires /dev/hailo0 and HAILO_VLM_HEF"]
+    #[ignore = "requires a Hailo device (/dev/hailo0 or /dev/h1x-0, depending on driver generation) and HAILO_VLM_HEF"]
     fn smoke_vlm_input_frame_info() {
         let hef = std::env::var("HAILO_VLM_HEF").expect("HAILO_VLM_HEF");
         let mut vlm = Vlm::create(&hef, false).expect("create vlm");
@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires /dev/hailo0 and HAILO_VLM_HEF"]
+    #[ignore = "requires a Hailo device (/dev/hailo0 or /dev/h1x-0, depending on driver generation) and HAILO_VLM_HEF"]
     fn smoke_vlm_generate_with_solid_frame() {
         let hef = std::env::var("HAILO_VLM_HEF").expect("HAILO_VLM_HEF");
         let mut vlm = Vlm::create(&hef, false).expect("create vlm");
@@ -417,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires /dev/hailo0 and HAILO_VLM_HEF"]
+    #[ignore = "requires a Hailo device (/dev/hailo0 or /dev/h1x-0, depending on driver generation) and HAILO_VLM_HEF"]
     fn smoke_vlm_generate_stream_with_solid_frame() {
         let hef = std::env::var("HAILO_VLM_HEF").expect("HAILO_VLM_HEF");
         let mut vlm = Vlm::create(&hef, false).expect("create vlm");
@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires /dev/hailo0 and HAILO_VLM_HEF"]
+    #[ignore = "requires a Hailo device (/dev/hailo0 or /dev/h1x-0, depending on driver generation) and HAILO_VLM_HEF"]
     fn smoke_vlm_generate_stream_accepts_all_generation_params() {
         // Regression test: HailoRT rejects an explicit 0.0 frequency_penalty
         // with HAILO_INVALID_ARGUMENT (found on real hardware) — the shim

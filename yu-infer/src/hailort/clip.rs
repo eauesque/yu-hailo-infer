@@ -98,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires /dev/hailo0 and HAILO_CLIP_HEF"]
+    #[ignore = "requires a Hailo device (/dev/hailo0 or /dev/h1x-0, depending on driver generation) and HAILO_CLIP_HEF"]
     fn smoke_clip_image_one_zero_frame_runs() {
         let hef = std::env::var("HAILO_CLIP_HEF").expect("HAILO_CLIP_HEF");
         let metadata = load_clip_image_metadata(&hef).expect("metadata");

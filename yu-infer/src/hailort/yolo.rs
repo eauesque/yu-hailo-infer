@@ -117,7 +117,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires /dev/hailo0 and HAILO_YOLO_HEF"]
+    #[ignore = "requires a Hailo device (/dev/hailo0 or /dev/h1x-0, depending on driver generation) and HAILO_YOLO_HEF"]
     fn smoke_yolo_hef_metadata_loads() {
         let hef = std::env::var("HAILO_YOLO_HEF").expect("HAILO_YOLO_HEF");
         let metadata = load_yolo_metadata(&hef).expect("metadata");
@@ -126,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires /dev/hailo0 and HAILO_YOLO_HEF"]
+    #[ignore = "requires a Hailo device (/dev/hailo0 or /dev/h1x-0, depending on driver generation) and HAILO_YOLO_HEF"]
     fn smoke_yolo_one_zero_frame_runs() {
         let hef = std::env::var("HAILO_YOLO_HEF").expect("HAILO_YOLO_HEF");
         let metadata = load_yolo_metadata(&hef).expect("metadata");

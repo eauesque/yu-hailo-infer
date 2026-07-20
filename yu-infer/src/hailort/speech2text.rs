@@ -144,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires /dev/hailo0 and HAILO_S2T_HEF"]
+    #[ignore = "requires a Hailo device (/dev/hailo0 or /dev/h1x-0, depending on driver generation) and HAILO_S2T_HEF"]
     fn smoke_speech2text_create_and_tokenize() {
         let hef = std::env::var("HAILO_S2T_HEF").expect("HAILO_S2T_HEF");
         let mut s2t = Speech2Text::create(&hef).expect("create speech2text");

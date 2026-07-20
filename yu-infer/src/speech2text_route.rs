@@ -517,7 +517,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires /dev/hailo0 and HAILO_S2T_HEF"]
+    #[ignore = "requires a Hailo device (/dev/hailo0 or /dev/h1x-0, depending on driver generation) and HAILO_S2T_HEF"]
     async fn smoke_speech2text_transcribe() {
         let hef_path = std::env::var("HAILO_S2T_HEF").expect("HAILO_S2T_HEF must be set");
         let audio_base64 = encode_wav(pcm16_spec(1, 16_000), &vec![0.0; 16_000]);

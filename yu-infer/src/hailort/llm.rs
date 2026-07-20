@@ -332,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires /dev/hailo0 and HAILO_LLM_HEF"]
+    #[ignore = "requires a Hailo device (/dev/hailo0 or /dev/h1x-0, depending on driver generation) and HAILO_LLM_HEF"]
     fn smoke_llm_create_and_tokenize() {
         let hef = std::env::var("HAILO_LLM_HEF").expect("HAILO_LLM_HEF");
         let mut llm = Llm::create(&hef, None, false).expect("create llm");
@@ -342,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires /dev/hailo0 and HAILO_LLM_HEF"]
+    #[ignore = "requires a Hailo device (/dev/hailo0 or /dev/h1x-0, depending on driver generation) and HAILO_LLM_HEF"]
     fn smoke_llm_generate_stream_accepts_all_generation_params() {
         // Same regression coverage as the VLM equivalent: HailoRT rejects an
         // explicit 0.0 frequency_penalty, so this exercises every
