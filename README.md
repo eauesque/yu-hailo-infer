@@ -5,6 +5,8 @@ Hailo-10H向けRustネイティブ推論マイクロサービス。HTTP経由で
 
 変更履歴: [CHANGELOG.md](CHANGELOG.md)。本プロジェクトは非公式であり、Hailo社との提携関係はない。
 
+本crateは`-sys`バインディングではなくサービス本体である。対象はHailo-10Hであり、当該デバイスではC APIの`VStreams`経路が`HAILO_NOT_IMPLEMENTED`を返すため、HailoRTへはC++の`InferModel` APIを独自の小さなシム経由で呼び出している。生のC APIバインディング(Raspberry PiのHailo-8 / AI HAT+向け等)を求める場合は、別プロジェクトである[`hailort-sys`](https://crates.io/crates/hailort-sys)を参照されたい。同crateは本crateより一段下の層に位置する。
+
 ## 対応機能
 
 | 機能 | エンドポイント | 状態 |

@@ -5,6 +5,8 @@ Rust native inference microservice for Hailo-10H. Exposes CLIP embeddings, WD-Ta
 
 Release history: [CHANGELOG.en.md](CHANGELOG.en.md). Unofficial — not affiliated with Hailo.
 
+This is the service itself, not a `-sys` binding crate. It targets the Hailo-10H and reaches HailoRT through the C++ `InferModel` API via a small in-tree shim, because the C `VStreams` path returns `HAILO_NOT_IMPLEMENTED` on that device. If you want raw C-API bindings — for the Hailo-8 / AI HAT+ on Raspberry Pi, for instance — see [`hailort-sys`](https://crates.io/crates/hailort-sys) instead; it is an unrelated project and sits a layer below this one.
+
 ## Supported Features
 
 | Feature | Endpoint | Status |
