@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Mutex};
 
-use image::{imageops::FilterType, GenericImageView};
+use image::imageops::FilterType;
 use ndarray::Array4;
 use ort::{session::Session, value::Value};
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,38 @@ use crate::{
     tags::{load_tags, TagMeta},
     InferError,
 };
+
+/// WD inputs are reduced to the model's fixed-size canvas, so decoding images
+/// larger than this consumes memory without improving inference quality.
+const MAX_WD_DECODED_IMAGE_DIMENSION: u32 = 4096;
+const MAX_WD_DECODED_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+const WD_DECODED_BYTES_PER_PIXEL: u64 = 4;
+
+fn validate_wd_image_dimensions(width: u32, height: u32) -> Result<(), InferError> {
+    if width == 0
+        || height == 0
+        || width > MAX_WD_DECODED_IMAGE_DIMENSION
+        || height > MAX_WD_DECODED_IMAGE_DIMENSION
+    {
+        return Err(InferError::InvalidModelOutput(format!(
+            "WD image dimensions {width}x{height} exceed the {MAX_WD_DECODED_IMAGE_DIMENSION}px limit"
+        )));
+    }
+    let decoded_bytes = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(WD_DECODED_BYTES_PER_PIXEL))
+        .ok_or_else(|| {
+            InferError::InvalidModelOutput(
+                "WD image dimensions overflow allocation accounting".to_string(),
+            )
+        })?;
+    if decoded_bytes > MAX_WD_DECODED_IMAGE_BYTES {
+        return Err(InferError::InvalidModelOutput(format!(
+            "WD image requires {decoded_bytes} decoded bytes, exceeding the {MAX_WD_DECODED_IMAGE_BYTES}-byte limit"
+        )));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TagPrediction {
@@ -155,25 +187,35 @@ impl WdInferEngine {
     }
 
     fn preprocess(&self, path: &Path) -> Result<Array4<f32>, InferError> {
-        let img = image::open(path)?;
-        let (w, h) = img.dimensions();
-        let side = w.max(h);
-        let mut canvas = image::RgbImage::from_pixel(side, side, image::Rgb([255, 255, 255]));
-        let x = (side - w) / 2;
-        let y = (side - h) / 2;
-        image::imageops::overlay(&mut canvas, &img.to_rgb8(), x as i64, y as i64);
-        let resized = image::imageops::resize(
-            &canvas,
+        let mut reader = image::ImageReader::open(path)?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(MAX_WD_DECODED_IMAGE_DIMENSION);
+        limits.max_image_height = Some(MAX_WD_DECODED_IMAGE_DIMENSION);
+        limits.max_alloc = Some(MAX_WD_DECODED_IMAGE_BYTES);
+        reader.limits(limits);
+        let img = reader.decode()?;
+        validate_wd_image_dimensions(img.width(), img.height())?;
+
+        // Resize first, then letterbox directly into the fixed model canvas.
+        // This avoids allocating a square based on attacker-controlled source
+        // dimensions before reducing the image to the model input size.
+        let resized = img
+            .resize(self.input_size, self.input_size, FilterType::Lanczos3)
+            .to_rgb8();
+        let mut canvas = image::RgbImage::from_pixel(
             self.input_size,
             self.input_size,
-            FilterType::Lanczos3,
+            image::Rgb([255, 255, 255]),
         );
+        let x = (self.input_size - resized.width()) / 2;
+        let y = (self.input_size - resized.height()) / 2;
+        image::imageops::overlay(&mut canvas, &resized, x as i64, y as i64);
 
         let size = self.input_size as usize;
         let mut arr = Array4::<f32>::zeros((1, size, size, 3));
         for y in 0..size {
             for x in 0..size {
-                let p = resized.get_pixel(x as u32, y as u32);
+                let p = canvas.get_pixel(x as u32, y as u32);
                 arr[[0, y, x, 0]] = p[2] as f32; // B
                 arr[[0, y, x, 1]] = p[1] as f32; // G
                 arr[[0, y, x, 2]] = p[0] as f32; // R
@@ -192,4 +234,16 @@ fn load_input_size(model_dir: &Path) -> Option<u32> {
     let json: serde_json::Value =
         serde_json::from_reader(std::fs::File::open(json_path).ok()?).ok()?;
     json.get("input_size")?.as_u64().map(|n| n as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wd_image_dimension_limits_reject_oversized_and_overflowing_inputs() {
+        assert!(validate_wd_image_dimensions(4096, 4096).is_ok());
+        assert!(validate_wd_image_dimensions(4097, 1).is_err());
+        assert!(validate_wd_image_dimensions(u32::MAX, u32::MAX).is_err());
+    }
 }

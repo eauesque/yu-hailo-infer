@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # No HailoRT SDK here, and none is needed: build.rs looks for
+      # hailo/hailort.hpp, does not find it, and compiles src/hailort/shim_stub.cpp
+      # with cfg(hailo_stub) instead. That is the documented path for non-Hailo
+      # hosts, so CI exercises everything except the device calls themselves.
+      # Device-dependent behaviour stays covered only by hardware testing.
+      - name: Build essentials
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # Mirrors scripts/pre_push_check.sh so CI and the local gate cannot drift.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        # Serial by necessity: run_media_preprocessing reserves permits from a
+        # process-global semaphore shared by the audio and image routes, so
+        # parallel tests take each other's capacity and get 503
+        # "media_preprocessing_busy" instead of the status under test.
+        # scripts/pre_push_check.sh passes the same flag — keep them in step.
+        run: cargo test --workspace -- --test-threads=1

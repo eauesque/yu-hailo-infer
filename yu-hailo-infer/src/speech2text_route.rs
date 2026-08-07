@@ -11,13 +11,16 @@ use serde_json::json;
 use crate::{
     hailort::{Speech2Text, Speech2TextTask},
     router::{
-        api_error, api_ok, auth_error, run_hailort_task, s2t_hef_path, AppState, MAX_TIMEOUT_MS,
+        api_error, api_ok, auth_error, run_hailort_task, run_media_preprocessing, s2t_hef_path,
+        AppState, MediaPreprocessError, MAX_TIMEOUT_MS,
     },
 };
 
 const MAX_AUDIO_BASE64_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum decoded audio length: 16 kHz × 600 seconds = 10 minutes.
 const MAX_AUDIO_SAMPLES: usize = 16_000 * 600;
+/// Includes the decoded source, downmix, resample, and final audio buffers.
+const MAX_AUDIO_PREPROCESSING_RESERVATION_BYTES: u64 = 160 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub struct TranscribeRequest {
@@ -154,44 +157,64 @@ async fn speech2text_transcribe(
         );
     }
 
-    let audio = match decode_base64_wav(&body.audio_base64) {
-        Ok(audio) => audio,
-        Err(WavDecodeError::TooLarge) => {
-            return api_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "audio_too_large",
-                format!("audio_base64 exceeds {MAX_AUDIO_BASE64_BYTES} bytes"),
-            );
-        }
-        Err(WavDecodeError::InvalidBase64) => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_audio_base64",
-                "audio_base64 is not valid base64".to_string(),
-            );
-        }
-        Err(WavDecodeError::UnsupportedFormat) => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "unsupported_wav_format",
-                "audio_base64 must contain a 16-bit PCM or 32-bit float WAV".to_string(),
-            );
-        }
-        Err(WavDecodeError::TooLong) => {
-            return api_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "audio_too_long",
-                format!("decoded audio exceeds {MAX_AUDIO_SAMPLES} samples"),
-            );
-        }
-        Err(WavDecodeError::Empty) => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "audio_empty",
-                "decoded audio contains no samples".to_string(),
-            );
-        }
-    };
+    let audio_base64 = body.audio_base64;
+    let audio =
+        match run_media_preprocessing(MAX_AUDIO_PREPROCESSING_RESERVATION_BYTES, move || {
+            decode_base64_wav(&audio_base64)
+        })
+        .await
+        {
+            Ok(audio) => audio,
+            Err(MediaPreprocessError::Busy) => {
+                return api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "media_preprocessing_busy",
+                    "media preprocessing capacity is temporarily exhausted".to_string(),
+                )
+            }
+            Err(MediaPreprocessError::Task(WavDecodeError::TooLarge)) => {
+                return api_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "audio_too_large",
+                    format!("audio_base64 exceeds {MAX_AUDIO_BASE64_BYTES} bytes"),
+                );
+            }
+            Err(MediaPreprocessError::Task(WavDecodeError::InvalidBase64)) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_audio_base64",
+                    "audio_base64 is not valid base64".to_string(),
+                );
+            }
+            Err(MediaPreprocessError::Task(WavDecodeError::UnsupportedFormat)) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "unsupported_wav_format",
+                    "audio_base64 must contain a 16-bit PCM or 32-bit float WAV".to_string(),
+                );
+            }
+            Err(MediaPreprocessError::Task(WavDecodeError::TooLong)) => {
+                return api_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "audio_too_long",
+                    format!("decoded audio exceeds {MAX_AUDIO_SAMPLES} samples"),
+                );
+            }
+            Err(MediaPreprocessError::Task(WavDecodeError::Empty)) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "audio_empty",
+                    "decoded audio contains no samples".to_string(),
+                );
+            }
+            Err(MediaPreprocessError::Join(error)) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "media_preprocessing_failed",
+                    error,
+                )
+            }
+        };
 
     let task_name = body.task.as_deref().unwrap_or("transcribe");
     let task = match task_name {

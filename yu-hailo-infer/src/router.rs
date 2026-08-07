@@ -52,6 +52,36 @@ const MAX_LLM_STREAM_READS: usize = 8192;
 /// generously large multi-turn history, not a realistic conversation length.
 const MAX_LLM_MESSAGES: usize = 256;
 
+/// Media parsing runs outside Tokio's cooperative workers. Reservations are
+/// counted in MiB so image and audio routes share one process-wide budget.
+const MEDIA_PREPROCESSING_PERMIT_BYTES: u64 = 1024 * 1024;
+const MAX_MEDIA_PREPROCESSING_BYTES: u64 = 256 * 1024 * 1024;
+/// Includes decoded pixels, encoded input, and transient resize allocations.
+const MAX_IMAGE_PREPROCESSING_RESERVATION_BYTES: u64 = 96 * 1024 * 1024;
+
+#[derive(Debug)]
+pub(crate) enum MediaPreprocessError<E> {
+    Busy,
+    Task(E),
+    Join(String),
+}
+
+fn media_preprocessing_semaphore() -> Arc<tokio::sync::Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    SEMAPHORE
+        .get_or_init(|| {
+            Arc::new(tokio::sync::Semaphore::new(
+                (MAX_MEDIA_PREPROCESSING_BYTES / MEDIA_PREPROCESSING_PERMIT_BYTES) as usize,
+            ))
+        })
+        .clone()
+}
+
+fn media_preprocessing_permits(reservation_bytes: u64) -> u32 {
+    u32::try_from(reservation_bytes.div_ceil(MEDIA_PREPROCESSING_PERMIT_BYTES))
+        .expect("media preprocessing reservation exceeds semaphore capacity type")
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub started_at: std::time::Instant,
@@ -319,6 +349,32 @@ where
     })
     .await
     .map_err(|error| format!("HailoRT task failed: {error}"))?
+}
+
+/// Runs bounded media parsing on Tokio's blocking pool after atomically
+/// reserving its worst-case working-set budget. Rejecting rather than queuing
+/// work prevents a request burst from creating an unbounded preprocessing queue.
+pub(crate) async fn run_media_preprocessing<T, E, F>(
+    reservation_bytes: u64,
+    task: F,
+) -> Result<T, MediaPreprocessError<E>>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+    F: FnOnce() -> Result<T, E> + Send + 'static,
+{
+    let permit = media_preprocessing_semaphore()
+        .try_acquire_many_owned(media_preprocessing_permits(reservation_bytes))
+        .map_err(|_| MediaPreprocessError::Busy)?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        task()
+    })
+    .await
+    .map_err(|error| {
+        MediaPreprocessError::Join(format!("media preprocessing task failed: {error}"))
+    })?
+    .map_err(MediaPreprocessError::Task)
 }
 
 fn validate_text_len(text: &str) -> Option<Response> {
@@ -692,7 +748,11 @@ async fn clip_image(
     if let Some(response) = auth_error(&state, &headers) {
         return response;
     }
-    if body.image_base64.len() > MAX_FRAME_BASE64_BYTES {
+    let ClipImageRequest {
+        hef_path,
+        image_base64,
+    } = body;
+    if image_base64.len() > MAX_FRAME_BASE64_BYTES {
         return api_error(
             StatusCode::PAYLOAD_TOO_LARGE,
             "clip_image_too_large",
@@ -700,12 +760,7 @@ async fn clip_image(
         );
     }
 
-    let mut decode_budget = MAX_TOTAL_DECODED_IMAGE_BYTES;
-    let image = match decode_base64_image(&body.image_base64, &mut decode_budget) {
-        Ok(image) => image,
-        Err(error) => return api_error(StatusCode::BAD_REQUEST, "clip_image_invalid_image", error),
-    };
-    let hef_path = clip_image_hef_path(body.hef_path.as_deref());
+    let hef_path = clip_image_hef_path(hef_path.as_deref());
     let hef_path_str = hef_path.to_string_lossy().to_string();
     let metadata = match run_hailort_task({
         let hef_path_str = hef_path_str.clone();
@@ -731,18 +786,41 @@ async fn clip_image(
             "CLIP image input must use a non-empty HWC RGB tensor".to_string(),
         );
     }
-    let input = resize_frame(&image, width as u32, height as u32);
-    if input.len() != metadata.input.frame_size {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "hailort_clip_image_input_size_mismatch",
-            format!(
-                "CLIP image input size mismatch: expected {} bytes, got {}",
-                metadata.input.frame_size,
-                input.len()
-            ),
-        );
-    }
+    let input =
+        match run_media_preprocessing(MAX_IMAGE_PREPROCESSING_RESERVATION_BYTES, move || {
+            let mut decode_budget = MAX_TOTAL_DECODED_IMAGE_BYTES;
+            let image = decode_base64_image(&image_base64, &mut decode_budget)?;
+            let input = resize_frame(&image, width as u32, height as u32);
+            if input.len() != metadata.input.frame_size {
+                return Err(format!(
+                    "CLIP image input size mismatch: expected {} bytes, got {}",
+                    metadata.input.frame_size,
+                    input.len()
+                ));
+            }
+            Ok(input)
+        })
+        .await
+        {
+            Ok(input) => input,
+            Err(MediaPreprocessError::Busy) => {
+                return api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "media_preprocessing_busy",
+                    "media preprocessing capacity is temporarily exhausted".to_string(),
+                )
+            }
+            Err(MediaPreprocessError::Task(error)) => {
+                return api_error(StatusCode::BAD_REQUEST, "clip_image_invalid_image", error)
+            }
+            Err(MediaPreprocessError::Join(error)) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "media_preprocessing_failed",
+                    error,
+                )
+            }
+        };
     let vector = match run_hailort_task({
         let hef_path_str = hef_path_str.clone();
         move || run_clip_image_once(&hef_path_str, &input)
@@ -1023,12 +1101,9 @@ async fn llm_generate_stream(
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-/// Shared prompt/frame validation and decoding for both the buffered and
-/// streaming VLM generate endpoints.
-fn validate_and_decode_vlm_input(
-    prompt: &str,
-    frames: &[String],
-) -> Result<Vec<image::DynamicImage>, Box<Response>> {
+/// Cheap request validation is kept on the async handler; parsing and image
+/// allocation are delegated to the bounded preprocessing pool below.
+fn validate_vlm_input(prompt: &str, frames: &[String]) -> Result<(), Box<Response>> {
     if prompt.len() > MAX_PROMPT_BYTES {
         return Err(Box::new(api_error(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -1050,18 +1125,15 @@ fn validate_and_decode_vlm_input(
             format!("at most {MAX_FRAMES} frames are allowed"),
         )));
     }
+    Ok(())
+}
+
+fn decode_vlm_frames(frames: Vec<String>) -> Result<Vec<image::DynamicImage>, String> {
     let mut decode_budget = MAX_TOTAL_DECODED_IMAGE_BYTES;
     frames
         .iter()
         .map(|frame| decode_base64_image(frame, &mut decode_budget))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| {
-            Box::new(api_error(
-                StatusCode::BAD_REQUEST,
-                "vlm_invalid_frame",
-                error,
-            ))
-        })
+        .collect()
 }
 
 async fn vlm_generate(
@@ -1072,10 +1144,35 @@ async fn vlm_generate(
     if let Some(response) = auth_error(&state, &headers) {
         return response;
     }
-    let images = match validate_and_decode_vlm_input(&body.prompt, &body.frames) {
-        Ok(images) => images,
-        Err(response) => return *response,
-    };
+    if let Err(response) = validate_vlm_input(&body.prompt, &body.frames) {
+        return *response;
+    }
+    let frames = body.frames;
+    let images =
+        match run_media_preprocessing(MAX_IMAGE_PREPROCESSING_RESERVATION_BYTES, move || {
+            decode_vlm_frames(frames)
+        })
+        .await
+        {
+            Ok(images) => images,
+            Err(MediaPreprocessError::Busy) => {
+                return api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "media_preprocessing_busy",
+                    "media preprocessing capacity is temporarily exhausted".to_string(),
+                )
+            }
+            Err(MediaPreprocessError::Task(error)) => {
+                return api_error(StatusCode::BAD_REQUEST, "vlm_invalid_frame", error)
+            }
+            Err(MediaPreprocessError::Join(error)) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "media_preprocessing_failed",
+                    error,
+                )
+            }
+        };
 
     let timeout_ms = body.timeout_ms.unwrap_or(30_000).min(MAX_TIMEOUT_MS);
     let hef_path = vlm_hef_path(body.hef_path.as_deref());
@@ -1125,10 +1222,35 @@ async fn vlm_generate_stream(
             );
         }
     }
-    let images = match validate_and_decode_vlm_input(&body.prompt, &body.frames) {
-        Ok(images) => images,
-        Err(response) => return *response,
-    };
+    if let Err(response) = validate_vlm_input(&body.prompt, &body.frames) {
+        return *response;
+    }
+    let frames = body.frames;
+    let images =
+        match run_media_preprocessing(MAX_IMAGE_PREPROCESSING_RESERVATION_BYTES, move || {
+            decode_vlm_frames(frames)
+        })
+        .await
+        {
+            Ok(images) => images,
+            Err(MediaPreprocessError::Busy) => {
+                return api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "media_preprocessing_busy",
+                    "media preprocessing capacity is temporarily exhausted".to_string(),
+                )
+            }
+            Err(MediaPreprocessError::Task(error)) => {
+                return api_error(StatusCode::BAD_REQUEST, "vlm_invalid_frame", error)
+            }
+            Err(MediaPreprocessError::Join(error)) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "media_preprocessing_failed",
+                    error,
+                )
+            }
+        };
 
     let timeout_ms = body.timeout_ms.unwrap_or(30_000).min(MAX_TIMEOUT_MS);
     let hef_path = vlm_hef_path(body.hef_path.as_deref());
@@ -1310,6 +1432,16 @@ mod tests {
             wd_infer: Arc::new(RwLock::new(HashMap::new())),
             clip_text: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    #[tokio::test]
+    async fn media_preprocessing_rejects_work_that_exceeds_the_global_budget() {
+        let result = run_media_preprocessing::<(), (), _>(
+            MAX_MEDIA_PREPROCESSING_BYTES + MEDIA_PREPROCESSING_PERMIT_BYTES,
+            || Ok(()),
+        )
+        .await;
+        assert!(matches!(result, Err(MediaPreprocessError::Busy)));
     }
 
     #[test]

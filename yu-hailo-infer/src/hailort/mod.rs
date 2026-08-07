@@ -33,6 +33,12 @@ pub(crate) use yolo::{
 
 #[cfg(test)]
 mod tests {
+    // Gated to match its only consumer below. Without HailoRT headers build.rs
+    // sets cfg(hailo_stub), the test disappears, and an ungated import here
+    // becomes dead — which fails `clippy -D warnings` on any host lacking the
+    // SDK, including CI. An `#[allow(unused_imports)]` would hide that, and
+    // would also hide a genuinely dead import added later.
+    #[cfg(not(hailo_stub))]
     use super::*;
 
     #[cfg(not(hailo_stub))]
