@@ -3,11 +3,11 @@ use std::ptr::NonNull;
 
 use super::{check_status, ffi, HailoRtError, HailoRtResult};
 
-enum YuHailortVlm {}
+pub(super) enum YuHailortVlm {}
 enum YuHailortVlmStream {}
 
 extern "C" {
-    fn yu_hailort_vlm_create(
+    pub(super) fn yu_hailort_vlm_create(
         model_path: *const c_char,
         optimize_memory_on_device: bool,
         out: *mut *mut YuHailortVlm,

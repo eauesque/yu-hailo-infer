@@ -44,6 +44,7 @@ struct YuHailortBuffer {
 enum YuHailortYolo {}
 
 extern "C" {
+    fn yu_hailort_set_vdevice_group_id(group_id: *const c_char) -> ffi::HailoStatus;
     fn yu_hailort_yolo_create(
         hef_path: *const c_char,
         out: *mut *mut YuHailortYolo,
@@ -61,6 +62,67 @@ extern "C" {
         outputs_count: usize,
         timeout_ms: u32,
     ) -> ffi::HailoStatus;
+    #[cfg(all(test, hailo_stub))]
+    fn yu_hailort_stub_vdevice_create_count() -> usize;
+    #[cfg(all(test, hailo_stub))]
+    fn yu_hailort_stub_yolo_create_count() -> usize;
+    #[cfg(all(test, hailo_stub))]
+    fn yu_hailort_stub_yolo_release_count() -> usize;
+    #[cfg(all(test, hailo_stub))]
+    fn yu_hailort_stub_s2t_create_count() -> usize;
+    #[cfg(all(test, hailo_stub))]
+    fn yu_hailort_stub_s2t_release_count() -> usize;
+    #[cfg(all(test, hailo_stub))]
+    fn yu_hailort_stub_llm_create_count() -> usize;
+    #[cfg(all(test, hailo_stub))]
+    fn yu_hailort_stub_llm_release_count() -> usize;
+    #[cfg(all(test, hailo_stub))]
+    fn yu_hailort_stub_llm_clear_context_count() -> usize;
+    #[cfg(all(test, hailo_stub))]
+    fn yu_hailort_stub_vlm_create_count() -> usize;
+    #[cfg(all(test, hailo_stub))]
+    fn yu_hailort_stub_vlm_release_count() -> usize;
+}
+
+#[cfg(all(test, hailo_stub))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StubCounts {
+    pub(crate) vdevice_create: usize,
+    pub(crate) yolo_create: usize,
+    pub(crate) yolo_release: usize,
+    pub(crate) s2t_create: usize,
+    pub(crate) s2t_release: usize,
+    pub(crate) llm_create: usize,
+    pub(crate) llm_release: usize,
+    pub(crate) llm_clear_context: usize,
+    pub(crate) vlm_create: usize,
+    pub(crate) vlm_release: usize,
+}
+
+#[cfg(all(test, hailo_stub))]
+pub(crate) fn stub_counts() -> StubCounts {
+    // SAFETY: these test-only stub functions take no pointers and return process counters.
+    unsafe {
+        StubCounts {
+            vdevice_create: yu_hailort_stub_vdevice_create_count(),
+            yolo_create: yu_hailort_stub_yolo_create_count(),
+            yolo_release: yu_hailort_stub_yolo_release_count(),
+            s2t_create: yu_hailort_stub_s2t_create_count(),
+            s2t_release: yu_hailort_stub_s2t_release_count(),
+            llm_create: yu_hailort_stub_llm_create_count(),
+            llm_release: yu_hailort_stub_llm_release_count(),
+            llm_clear_context: yu_hailort_stub_llm_clear_context_count(),
+            vlm_create: yu_hailort_stub_vlm_create_count(),
+            vlm_release: yu_hailort_stub_vlm_release_count(),
+        }
+    }
+}
+
+pub(crate) fn set_vdevice_group_id(group_id: &str) -> HailoRtResult<()> {
+    let group_id = CString::new(group_id)?;
+    // SAFETY: group_id is a valid C string and remains alive for the call; the shim copies it.
+    let status = unsafe { yu_hailort_set_vdevice_group_id(group_id.as_ptr()) };
+    check_status("set_vdevice_group_id", status)
 }
 
 pub(crate) struct ShimYolo {
@@ -162,4 +224,20 @@ fn convert_infos(raw: &[YuHailortTensorInfo], direction: VStreamDirection) -> Ve
             frame_size: info.frame_size,
         })
         .collect()
+}
+
+#[cfg(all(test, hailo_stub))]
+mod tests {
+    use super::*;
+    use crate::hailort::{Llm, Speech2Text, Vlm};
+
+    #[test]
+    fn all_create_paths_create_at_most_one_vdevice() {
+        let _yolo = ShimYolo::create("model").unwrap();
+        let _speech2text = Speech2Text::create("model").unwrap();
+        let _llm = Llm::create("model", None, false).unwrap();
+        let _vlm = Vlm::create("model", false).unwrap();
+        let count = stub_counts().vdevice_create;
+        assert!(count > 0 && count <= 1, "VDevice create count was {count}");
+    }
 }

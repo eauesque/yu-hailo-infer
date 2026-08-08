@@ -3,7 +3,7 @@ use std::ptr::NonNull;
 
 use super::{check_status, ffi, HailoRtError, HailoRtResult};
 
-enum YuHailortSpeech2Text {}
+pub(super) enum YuHailortSpeech2Text {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Speech2TextTask {
@@ -12,7 +12,7 @@ pub(crate) enum Speech2TextTask {
 }
 
 extern "C" {
-    fn yu_hailort_s2t_create(
+    pub(super) fn yu_hailort_s2t_create(
         model_path: *const c_char,
         out: *mut *mut YuHailortSpeech2Text,
     ) -> ffi::HailoStatus;

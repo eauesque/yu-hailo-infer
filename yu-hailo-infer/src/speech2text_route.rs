@@ -9,10 +9,10 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    hailort::{Speech2Text, Speech2TextTask},
+    hailort::Speech2TextTask,
     router::{
-        api_error, api_ok, auth_error, run_hailort_task, run_media_preprocessing, s2t_hef_path,
-        AppState, MediaPreprocessError, MAX_TIMEOUT_MS,
+        api_error, api_ok, auth_error, hailort_api_error, run_hailort_task,
+        run_media_preprocessing, s2t_hef_path, AppState, MediaPreprocessError, MAX_TIMEOUT_MS,
     },
 };
 
@@ -244,8 +244,8 @@ async fn speech2text_transcribe(
     let task_name = task_name.to_string();
     let result = run_hailort_task({
         let hef_path_str = hef_path_str.clone();
-        move || {
-            Speech2Text::create(&hef_path_str).and_then(|mut s2t| {
+        move |ctx| {
+            ctx.speech2text(&hef_path_str).and_then(|mut s2t| {
                 s2t.generate_text(
                     &audio,
                     task,
@@ -259,11 +259,7 @@ async fn speech2text_transcribe(
     .await;
     match result {
         Ok(text) => api_ok(json!({"hef_path": hef_path_str, "text": text, "task": task_name})),
-        Err(error) => api_error(
-            StatusCode::BAD_REQUEST,
-            "hailort_s2t_generate_failed",
-            error,
-        ),
+        Err(error) => hailort_api_error(error, "hailort_s2t_generate_failed"),
     }
 }
 

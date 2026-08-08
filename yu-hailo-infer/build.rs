@@ -1,5 +1,6 @@
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(hailo_stub)");
+    println!("cargo:rerun-if-changed=src/hailort/shim.h");
     println!("cargo:rerun-if-changed=src/hailort/shim.cpp");
     println!("cargo:rerun-if-changed=src/hailort/shim_stub.cpp");
     println!("cargo:rerun-if-env-changed=HAILO_INCLUDE_DIR");

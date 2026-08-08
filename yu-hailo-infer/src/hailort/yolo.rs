@@ -38,9 +38,7 @@ pub(crate) struct YoloInferenceResult {
     pub(crate) outputs: Vec<YoloOutputBuffer>,
 }
 
-pub(crate) fn load_yolo_metadata(hef_path: &str) -> HailoRtResult<YoloModelMetadata> {
-    let hef = Hef::from_path(hef_path)?;
-    let infos = hef.vstream_infos()?;
+fn validate_metadata(infos: Vec<VStreamInfo>) -> HailoRtResult<YoloModelMetadata> {
     let (inputs, outputs): (Vec<_>, Vec<_>) = infos
         .into_iter()
         .partition(|info| info.direction == VStreamDirection::Input);
@@ -55,6 +53,16 @@ pub(crate) fn load_yolo_metadata(hef_path: &str) -> HailoRtResult<YoloModelMetad
         ));
     }
     Ok(YoloModelMetadata { inputs, outputs })
+}
+
+pub(crate) fn load_yolo_metadata(hef_path: &str) -> HailoRtResult<YoloModelMetadata> {
+    let hef = Hef::from_path(hef_path)?;
+    validate_metadata(hef.vstream_infos()?)
+}
+
+pub(crate) fn yolo_metadata(yolo: &ShimYolo) -> HailoRtResult<YoloModelMetadata> {
+    let (inputs, outputs) = yolo.metadata()?;
+    validate_metadata(inputs.into_iter().chain(outputs).collect())
 }
 
 pub(crate) fn validate_input_len(
@@ -72,10 +80,11 @@ pub(crate) fn validate_input_len(
     Ok(())
 }
 
-pub(crate) fn run_yolo_once(hef_path: &str, input: &[u8]) -> HailoRtResult<YoloInferenceResult> {
-    let mut yolo = ShimYolo::create(hef_path)?;
-    let (inputs, outputs) = yolo.metadata()?;
-    let metadata = YoloModelMetadata { inputs, outputs };
+pub(crate) fn run_yolo_once(
+    yolo: &mut ShimYolo,
+    input: &[u8],
+) -> HailoRtResult<YoloInferenceResult> {
+    let metadata = yolo_metadata(yolo)?;
     validate_input_len(&metadata, input.len())?;
 
     let mut output_storage: Vec<Vec<u8>> = metadata
@@ -131,7 +140,8 @@ mod tests {
         let hef = std::env::var("HAILO_YOLO_HEF").expect("HAILO_YOLO_HEF");
         let metadata = load_yolo_metadata(&hef).expect("metadata");
         let input_len = metadata.inputs[0].frame_size;
-        let result = run_yolo_once(&hef, &vec![0u8; input_len]).expect("one-frame inference");
+        let mut yolo = ShimYolo::create(&hef).expect("create yolo");
+        let result = run_yolo_once(&mut yolo, &vec![0u8; input_len]).expect("one-frame inference");
         assert_eq!(result.outputs.len(), metadata.outputs.len());
         for output in result.outputs {
             assert_eq!(output.data.len(), output.info.frame_size);

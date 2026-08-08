@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{mpsc, Arc, OnceLock, RwLock};
 
 use axum::{
     body::Body,
@@ -14,9 +14,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::hailort::{
-    load_clip_image_metadata, load_yolo_metadata, run_clip_image_once, run_yolo_once,
-    HailoRtResult, Llm, LlmChatMessage, LlmGenerationParams, LlmStream, Speech2Text, Vlm,
-    VlmGenerationParams, VlmStream, YoloModelMetadata,
+    clip_image_metadata, run_clip_image_once, run_yolo_once,
+    yolo_metadata as resident_yolo_metadata, HailoRtError, HailoRtResult, Llm, LlmChatMessage,
+    LlmGenerationParams, LlmStream, ShimYolo, Speech2Text, Vlm, VlmGenerationParams, VlmStream,
+    YoloModelMetadata,
 };
 use crate::speech2text_route::speech2text_transcribe_route;
 
@@ -25,7 +26,7 @@ pub use crate::speech2text_route::TranscribeRequest;
 const MAX_TEXT_BYTES: usize = 16 * 1024;
 const MAX_PROMPT_BYTES: usize = 16 * 1024;
 /// Upper bound accepted for a caller-supplied inference timeout. Prevents a
-/// client from holding the HailoRT device lock indefinitely.
+/// client from holding the HailoRT device thread indefinitely.
 pub(crate) const MAX_TIMEOUT_MS: u32 = 120_000;
 const MAX_FRAMES: usize = 8;
 const MAX_FRAME_BASE64_BYTES: usize = 8 * 1024 * 1024;
@@ -38,7 +39,7 @@ const MAX_FRAME_BASE64_BYTES: usize = 8 * 1024 * 1024;
 const MAX_VLM_BODY_BYTES: usize = MAX_FRAMES * MAX_FRAME_BASE64_BYTES + MAX_PROMPT_BYTES + 4096;
 /// Upper bound accepted for a caller-supplied `max_generated_tokens`
 /// override. Prevents a client from requesting an unbounded-length
-/// generation that would hold the HailoRT device lock indefinitely.
+/// generation that would hold the HailoRT device thread indefinitely.
 const MAX_VLM_GENERATED_TOKENS: u32 = 4096;
 /// Independent, defense-in-depth cap on the number of stream reads per
 /// request, applied regardless of `max_generated_tokens` — guards against a
@@ -51,6 +52,9 @@ const MAX_LLM_STREAM_READS: usize = 8192;
 /// Upper bound on the number of chat turns accepted per request — a
 /// generously large multi-turn history, not a realistic conversation length.
 const MAX_LLM_MESSAGES: usize = 256;
+const MAX_PANIC_HANDLE_DISCARDS: usize = 3;
+const HAILORT_DEGRADED_MESSAGE: &str =
+    "HailoRT handle discard limit reached; reboot required before further inference";
 
 /// Media parsing runs outside Tokio's cooperative workers. Reservations are
 /// counted in MiB so image and audio routes share one process-wide budget.
@@ -331,24 +335,270 @@ pub(crate) fn auth_error(state: &AppState, headers: &HeaderMap) -> Option<Respon
     )
 }
 
-pub(crate) fn hailort_device_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LlmKey {
+    model_path: String,
+    lora_name: Option<String>,
+    optimize_memory_on_device: bool,
 }
 
-pub(crate) async fn run_hailort_task<T, F>(task: F) -> Result<T, String>
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VlmKey {
+    model_path: String,
+    optimize_memory_on_device: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ActiveHandle {
+    InferModel(String),
+    Llm(LlmKey),
+    Vlm(VlmKey),
+}
+
+enum ResidentGenAi {
+    Llm { key: LlmKey, handle: Llm },
+    Vlm { key: VlmKey, handle: Vlm },
+}
+
+impl ResidentGenAi {
+    fn hef_path(&self) -> &str {
+        match self {
+            Self::Llm { key, .. } => &key.model_path,
+            Self::Vlm { key, .. } => &key.model_path,
+        }
+    }
+
+    fn matches_active(&self, active: &ActiveHandle) -> bool {
+        matches!((self, active),
+            (Self::Llm { key, .. }, ActiveHandle::Llm(active_key)) if key == active_key
+        ) || matches!((self, active),
+            (Self::Vlm { key, .. }, ActiveHandle::Vlm(active_key)) if key == active_key
+        )
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct DeviceCtx {
+    // No eviction: 1-2 InferModel handles are hardware-verified; 3+ is extrapolated.
+    infer_models: HashMap<String, ShimYolo>,
+    genai: Option<ResidentGenAi>,
+    active: Option<ActiveHandle>,
+    panic_discards: usize,
+    degraded: bool,
+}
+
+impl DeviceCtx {
+    fn infer_model(&mut self, hef_path: &str) -> HailoRtResult<&mut ShimYolo> {
+        if !self.infer_models.contains_key(hef_path) {
+            self.infer_models
+                .insert(hef_path.to_string(), ShimYolo::create(hef_path)?);
+        }
+        self.active = Some(ActiveHandle::InferModel(hef_path.to_string()));
+        Ok(self
+            .infer_models
+            .get_mut(hef_path)
+            .expect("inserted or existing InferModel handle"))
+    }
+
+    fn llm(
+        &mut self,
+        model_path: &str,
+        lora_name: Option<&str>,
+        optimize_memory_on_device: bool,
+    ) -> HailoRtResult<&mut Llm> {
+        let key = LlmKey {
+            model_path: model_path.to_string(),
+            lora_name: lora_name.map(str::to_string),
+            optimize_memory_on_device,
+        };
+        if self.genai.is_none() {
+            self.genai = Some(ResidentGenAi::Llm {
+                handle: Llm::create(model_path, lora_name, optimize_memory_on_device)?,
+                key: key.clone(),
+            });
+        }
+        if !matches!(self.genai.as_ref(), Some(ResidentGenAi::Llm { key: loaded, .. }) if loaded == &key)
+        {
+            return Err(HailoRtError::GenAiConflict {
+                requested: model_path.to_string(),
+                loaded: self
+                    .genai
+                    .as_ref()
+                    .expect("GenAI resident checked above")
+                    .hef_path()
+                    .to_string(),
+            });
+        }
+        self.active = Some(ActiveHandle::Llm(key));
+        match self.genai.as_mut() {
+            Some(ResidentGenAi::Llm { handle, .. }) => Ok(handle),
+            _ => unreachable!("matching LLM resident checked above"),
+        }
+    }
+
+    fn llm_for_generation(
+        &mut self,
+        model_path: &str,
+        lora_name: Option<&str>,
+        optimize_memory_on_device: bool,
+    ) -> HailoRtResult<&mut Llm> {
+        let llm = self.llm(model_path, lora_name, optimize_memory_on_device)?;
+        llm.clear_context()?;
+        Ok(llm)
+    }
+
+    fn vlm(
+        &mut self,
+        model_path: &str,
+        optimize_memory_on_device: bool,
+    ) -> HailoRtResult<&mut Vlm> {
+        let key = VlmKey {
+            model_path: model_path.to_string(),
+            optimize_memory_on_device,
+        };
+        if self.genai.is_none() {
+            self.genai = Some(ResidentGenAi::Vlm {
+                handle: Vlm::create(model_path, optimize_memory_on_device)?,
+                key: key.clone(),
+            });
+        }
+        if !matches!(self.genai.as_ref(), Some(ResidentGenAi::Vlm { key: loaded, .. }) if loaded == &key)
+        {
+            return Err(HailoRtError::GenAiConflict {
+                requested: model_path.to_string(),
+                loaded: self
+                    .genai
+                    .as_ref()
+                    .expect("GenAI resident checked above")
+                    .hef_path()
+                    .to_string(),
+            });
+        }
+        self.active = Some(ActiveHandle::Vlm(key));
+        match self.genai.as_mut() {
+            Some(ResidentGenAi::Vlm { handle, .. }) => Ok(handle),
+            _ => unreachable!("matching VLM resident checked above"),
+        }
+    }
+
+    fn vlm_for_generation(
+        &mut self,
+        model_path: &str,
+        optimize_memory_on_device: bool,
+    ) -> HailoRtResult<&mut Vlm> {
+        let vlm = self.vlm(model_path, optimize_memory_on_device)?;
+        vlm.clear_context()?;
+        Ok(vlm)
+    }
+
+    pub(crate) fn speech2text(&mut self, model_path: &str) -> HailoRtResult<Speech2Text> {
+        self.active = None;
+        Speech2Text::create(model_path)
+    }
+
+    fn discard_active_after_panic(&mut self) -> HailoTaskError {
+        let Some(active) = self.active.take() else {
+            return HailoTaskError::Panicked;
+        };
+        if self.panic_discards >= MAX_PANIC_HANDLE_DISCARDS {
+            self.degraded = true;
+            return HailoTaskError::Unavailable(HAILORT_DEGRADED_MESSAGE);
+        }
+        match &active {
+            ActiveHandle::InferModel(hef_path) => {
+                self.infer_models.remove(hef_path);
+            }
+            ActiveHandle::Llm(_) | ActiveHandle::Vlm(_) => {
+                if self
+                    .genai
+                    .as_ref()
+                    .is_some_and(|resident| resident.matches_active(&active))
+                {
+                    self.genai = None;
+                }
+            }
+        }
+        self.panic_discards += 1;
+        HailoTaskError::Panicked
+    }
+
+    fn run<T, F>(&mut self, task: F) -> Result<T, HailoTaskError>
+    where
+        F: FnOnce(&mut Self) -> HailoRtResult<T>,
+    {
+        if self.degraded {
+            return Err(HailoTaskError::Unavailable(HAILORT_DEGRADED_MESSAGE));
+        }
+        self.active = None;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task(self))) {
+            Ok(result) => {
+                self.active = None;
+                result.map_err(HailoTaskError::HailoRt)
+            }
+            Err(_) => Err(self.discard_active_after_panic()),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum HailoTaskError {
+    #[error(transparent)]
+    HailoRt(#[from] HailoRtError),
+    #[error("HailoRT task panicked")]
+    Panicked,
+    #[error("{0}")]
+    Unavailable(&'static str),
+}
+
+impl HailoTaskError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Self::HailoRt(HailoRtError::GenAiConflict { .. }) => StatusCode::CONFLICT,
+            Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::HailoRt(_) | Self::Panicked => StatusCode::BAD_REQUEST,
+        }
+    }
+}
+
+pub(crate) fn hailort_api_error(error: HailoTaskError, code: &'static str) -> Response {
+    api_error(error.status_code(), code, error.to_string())
+}
+
+// Only this closure and its Send result cross threads; DeviceCtx and device handles stay here.
+type DeviceTask = Box<dyn FnOnce(&mut DeviceCtx) + Send + 'static>;
+
+fn hailort_device_sender() -> &'static mpsc::Sender<DeviceTask> {
+    static SENDER: OnceLock<mpsc::Sender<DeviceTask>> = OnceLock::new();
+    SENDER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<DeviceTask>();
+        std::thread::Builder::new()
+            .name("hailort-device".to_string())
+            .spawn(move || {
+                let mut ctx = DeviceCtx::default();
+                for task in receiver {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        task(&mut ctx);
+                    }));
+                }
+            })
+            .expect("failed to start HailoRT device thread");
+        sender
+    })
+}
+
+pub(crate) async fn run_hailort_task<T, F>(task: F) -> Result<T, HailoTaskError>
 where
     T: Send + 'static,
-    F: FnOnce() -> HailoRtResult<T> + Send + 'static,
+    F: FnOnce(&mut DeviceCtx) -> HailoRtResult<T> + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || {
-        let _guard = hailort_device_lock()
-            .lock()
-            .map_err(|_| "HailoRT device lock poisoned".to_string())?;
-        task().map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| format!("HailoRT task failed: {error}"))?
+    // Device tasks must never wait for other device work: this single queue is non-reentrant.
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    hailort_device_sender()
+        .send(Box::new(move |ctx| {
+            let _ = sender.send(ctx.run(task));
+        }))
+        .map_err(|_| HailoTaskError::Unavailable("HailoRT device thread stopped"))?;
+    receiver.await.map_err(|_| HailoTaskError::Panicked)?
 }
 
 /// Runs bounded media parsing on Tokio's blocking pool after atomically
@@ -549,16 +799,12 @@ async fn yolo_metadata(
     let hef_path_str = hef_path.to_string_lossy().to_string();
     let result = run_hailort_task({
         let hef_path_str = hef_path_str.clone();
-        move || load_yolo_metadata(&hef_path_str)
+        move |ctx| resident_yolo_metadata(ctx.infer_model(&hef_path_str)?)
     })
     .await;
     match result {
         Ok(metadata) => api_ok(yolo_metadata_json(&metadata, &hef_path_str)),
-        Err(error) => api_error(
-            StatusCode::BAD_REQUEST,
-            "hailort_yolo_metadata_failed",
-            error,
-        ),
+        Err(error) => hailort_api_error(error, "hailort_yolo_metadata_failed"),
     }
 }
 
@@ -574,17 +820,13 @@ async fn yolo_smoke_zero(
     let hef_path_str = hef_path.to_string_lossy().to_string();
     let metadata = match run_hailort_task({
         let hef_path_str = hef_path_str.clone();
-        move || load_yolo_metadata(&hef_path_str)
+        move |ctx| resident_yolo_metadata(ctx.infer_model(&hef_path_str)?)
     })
     .await
     {
         Ok(metadata) => metadata,
         Err(error) => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "hailort_yolo_metadata_failed",
-                error,
-            );
+            return hailort_api_error(error, "hailort_yolo_metadata_failed");
         }
     };
     let input_len = match metadata.inputs.first() {
@@ -599,7 +841,10 @@ async fn yolo_smoke_zero(
     };
     let result = run_hailort_task({
         let hef_path_str = hef_path_str.clone();
-        move || run_yolo_once(&hef_path_str, &vec![0u8; input_len])
+        move |ctx| {
+            let model = ctx.infer_model(&hef_path_str)?;
+            run_yolo_once(model, &vec![0u8; input_len])
+        }
     })
     .await;
     match result {
@@ -612,7 +857,7 @@ async fn yolo_smoke_zero(
                 "frame_size": output.info.frame_size,
             })).collect::<Vec<_>>(),
         })),
-        Err(error) => api_error(StatusCode::BAD_REQUEST, "hailort_yolo_smoke_failed", error),
+        Err(error) => hailort_api_error(error, "hailort_yolo_smoke_failed"),
     }
 }
 
@@ -666,17 +911,13 @@ async fn yolo_detect(
     };
     let metadata = match run_hailort_task({
         let hef_path_str = hef_path_str.clone();
-        move || load_yolo_metadata(&hef_path_str)
+        move |ctx| resident_yolo_metadata(ctx.infer_model(&hef_path_str)?)
     })
     .await
     {
         Ok(metadata) => metadata,
         Err(error) => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "hailort_yolo_metadata_failed",
-                error,
-            );
+            return hailort_api_error(error, "hailort_yolo_metadata_failed");
         }
     };
     let input_frame_size = match metadata.inputs.first() {
@@ -702,7 +943,10 @@ async fn yolo_detect(
 
     let result = run_hailort_task({
         let hef_path_str = hef_path_str.clone();
-        move || run_yolo_once(&hef_path_str, &input_bytes)
+        move |ctx| {
+            let model = ctx.infer_model(&hef_path_str)?;
+            run_yolo_once(model, &input_bytes)
+        }
     })
     .await;
     match result {
@@ -736,7 +980,7 @@ async fn yolo_detect(
                 }
             }
         }
-        Err(error) => api_error(StatusCode::BAD_REQUEST, "hailort_yolo_detect_failed", error),
+        Err(error) => hailort_api_error(error, "hailort_yolo_detect_failed"),
     }
 }
 
@@ -764,17 +1008,13 @@ async fn clip_image(
     let hef_path_str = hef_path.to_string_lossy().to_string();
     let metadata = match run_hailort_task({
         let hef_path_str = hef_path_str.clone();
-        move || load_clip_image_metadata(&hef_path_str)
+        move |ctx| clip_image_metadata(ctx.infer_model(&hef_path_str)?)
     })
     .await
     {
         Ok(metadata) => metadata,
         Err(error) => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "hailort_clip_image_metadata_failed",
-                error,
-            );
+            return hailort_api_error(error, "hailort_clip_image_metadata_failed");
         }
     };
     let dimensions = metadata.input.shape.dimensions();
@@ -823,13 +1063,16 @@ async fn clip_image(
         };
     let vector = match run_hailort_task({
         let hef_path_str = hef_path_str.clone();
-        move || run_clip_image_once(&hef_path_str, &input)
+        move |ctx| {
+            let model = ctx.infer_model(&hef_path_str)?;
+            run_clip_image_once(model, &input)
+        }
     })
     .await
     {
         Ok(vector) => vector,
         Err(error) => {
-            return api_error(StatusCode::BAD_REQUEST, "hailort_clip_image_failed", error);
+            return hailort_api_error(error, "hailort_clip_image_failed");
         }
     };
     api_ok(json!({
@@ -911,16 +1154,15 @@ async fn speech2text_tokenize(
     let result = run_hailort_task({
         let hef_path_str = hef_path_str.clone();
         let text = body.text;
-        move || Speech2Text::create(&hef_path_str).and_then(|mut s2t| s2t.tokenize(&text))
+        move |ctx| {
+            ctx.speech2text(&hef_path_str)
+                .and_then(|mut s2t| s2t.tokenize(&text))
+        }
     })
     .await;
     match result {
         Ok(tokens) => api_ok(json!({"hef_path": hef_path_str, "tokens": tokens})),
-        Err(error) => api_error(
-            StatusCode::BAD_REQUEST,
-            "hailort_s2t_tokenize_failed",
-            error,
-        ),
+        Err(error) => hailort_api_error(error, "hailort_s2t_tokenize_failed"),
     }
 }
 
@@ -940,16 +1182,12 @@ async fn llm_tokenize(
     let result = run_hailort_task({
         let hef_path_str = hef_path_str.clone();
         let text = body.text;
-        move || Llm::create(&hef_path_str, None, false).and_then(|mut llm| llm.tokenize(&text))
+        move |ctx| ctx.llm(&hef_path_str, None, false)?.tokenize(&text)
     })
     .await;
     match result {
         Ok(tokens) => api_ok(json!({"hef_path": hef_path_str, "tokens": tokens})),
-        Err(error) => api_error(
-            StatusCode::BAD_REQUEST,
-            "hailort_llm_tokenize_failed",
-            error,
-        ),
+        Err(error) => hailort_api_error(error, "hailort_llm_tokenize_failed"),
     }
 }
 
@@ -974,19 +1212,15 @@ async fn llm_generate(
     let result = run_hailort_task({
         let hef_path_str = hef_path_str.clone();
         let prompt = body.prompt;
-        move || {
-            Llm::create(&hef_path_str, None, false)
-                .and_then(|mut llm| llm.generate_text(&prompt, timeout_ms))
+        move |ctx| {
+            ctx.llm_for_generation(&hef_path_str, None, false)?
+                .generate_text(&prompt, timeout_ms)
         }
     })
     .await;
     match result {
         Ok(text) => api_ok(json!({"hef_path": hef_path_str, "text": text})),
-        Err(error) => api_error(
-            StatusCode::BAD_REQUEST,
-            "hailort_llm_generate_failed",
-            error,
-        ),
+        Err(error) => hailort_api_error(error, "hailort_llm_generate_failed"),
     }
 }
 
@@ -1051,38 +1285,44 @@ async fn llm_generate_stream(
         seed: body.seed,
     };
 
+    if let Err(error) = run_hailort_task({
+        let hef_path_str = hef_path_str.clone();
+        move |ctx| ctx.llm(&hef_path_str, None, false).map(|_| ())
+    })
+    .await
+    {
+        return hailort_api_error(error, "hailort_llm_generate_failed");
+    }
+
+    // SSE token delivery stays unbounded in Stage 2; do not add device-thread backpressure here.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-    tokio::task::spawn_blocking(move || {
-        let guard = hailort_device_lock().lock();
-        let Ok(_guard) = guard else {
-            let _ = tx.send(sse_data_event(
-                json!({"error": "HailoRT device lock poisoned"}),
-            ));
-            return;
-        };
-        let result: HailoRtResult<()> = (|| {
-            let mut llm = Llm::create(&hef_path_str, None, false)?;
-            let mut stream = LlmStream::start(&mut llm, &messages, params)?;
+    tokio::spawn(async move {
+        let work_tx = tx.clone();
+        let result = run_hailort_task(move |ctx| {
+            let llm = ctx.llm_for_generation(&hef_path_str, None, false)?;
+            // LlmStream borrows the handle, so the whole generation stays in one device task.
+            let mut stream = LlmStream::start(llm, &messages, params)?;
             let mut full_text = String::new();
             for _ in 0..MAX_LLM_STREAM_READS {
                 let (token, status) = stream.read_next(timeout_ms)?;
                 full_text.push_str(&token);
-                let _ = tx.send(sse_data_event(json!({"token": token})));
+                let _ = work_tx.send(sse_data_event(json!({"token": token})));
                 if !status.is_generating() {
-                    let _ = tx.send(sse_data_event(
+                    let _ = work_tx.send(sse_data_event(
                         json!({"done": true, "full_text": full_text}),
                     ));
                     return Ok(());
                 }
             }
-            let _ = tx.send(sse_data_event(
+            let _ = work_tx.send(sse_data_event(
                 json!({"error": format!("generation exceeded {MAX_LLM_STREAM_READS} token reads without reaching a terminal state")}),
             ));
             Ok(())
-        })();
+        })
+        .await;
         if let Err(error) = result {
-            let _ = tx.send(sse_data_event(json!({"error": error.to_string()})));
+            let _ = tx.send(sse_data_event(sse_hailort_error(error)));
         }
     });
 
@@ -1180,9 +1420,11 @@ async fn vlm_generate(
     let result = run_hailort_task({
         let hef_path_str = hef_path_str.clone();
         let prompt = body.prompt;
-        move || {
-            let mut vlm = Vlm::create(&hef_path_str, false)?;
+        move |ctx| {
+            let vlm = ctx.vlm_for_generation(&hef_path_str, false)?;
             let info = vlm.input_frame_info()?;
+            // Keep resizing here in Stage 3: splitting the device query from preprocessing
+            // is a separate latency optimization.
             let frames: Vec<Vec<u8>> = images
                 .iter()
                 .map(|image| resize_frame(image, info.width, info.height))
@@ -1193,16 +1435,21 @@ async fn vlm_generate(
     .await;
     match result {
         Ok(text) => api_ok(json!({"hef_path": hef_path_str, "text": text})),
-        Err(error) => api_error(
-            StatusCode::BAD_REQUEST,
-            "hailort_vlm_generate_failed",
-            error,
-        ),
+        Err(error) => hailort_api_error(error, "hailort_vlm_generate_failed"),
     }
 }
 
 fn sse_data_event(payload: Value) -> String {
     format!("data: {payload}\n\n")
+}
+
+fn sse_hailort_error(error: HailoTaskError) -> Value {
+    let message = error.to_string();
+    if error.status_code() == StatusCode::SERVICE_UNAVAILABLE {
+        json!({"error": message, "status": StatusCode::SERVICE_UNAVAILABLE.as_u16()})
+    } else {
+        json!({"error": message})
+    }
 }
 
 async fn vlm_generate_stream(
@@ -1267,44 +1514,52 @@ async fn vlm_generate_stream(
         seed: body.seed,
     };
 
+    if let Err(error) = run_hailort_task({
+        let hef_path_str = hef_path_str.clone();
+        move |ctx| ctx.vlm(&hef_path_str, false).map(|_| ())
+    })
+    .await
+    {
+        return hailort_api_error(error, "hailort_vlm_generate_failed");
+    }
+
+    // SSE token delivery stays unbounded in Stage 2; do not add device-thread backpressure here.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-    tokio::task::spawn_blocking(move || {
-        let guard = hailort_device_lock().lock();
-        let Ok(_guard) = guard else {
-            let _ = tx.send(sse_data_event(
-                json!({"error": "HailoRT device lock poisoned"}),
-            ));
-            return;
-        };
-        let result: HailoRtResult<()> = (|| {
-            let mut vlm = Vlm::create(&hef_path_str, false)?;
+    tokio::spawn(async move {
+        let work_tx = tx.clone();
+        let result = run_hailort_task(move |ctx| {
+            let vlm = ctx.vlm_for_generation(&hef_path_str, false)?;
             let info = vlm.input_frame_info()?;
+            // Keep resizing here in Stage 3: splitting the device query from preprocessing
+            // is a separate latency optimization.
             let frames: Vec<Vec<u8>> = images
                 .iter()
                 .map(|image| resize_frame(image, info.width, info.height))
                 .collect();
             let mut stream =
-                VlmStream::start(&mut vlm, &prompt, system_prompt.as_deref(), &frames, params)?;
+                VlmStream::start(vlm, &prompt, system_prompt.as_deref(), &frames, params)?;
+            // VlmStream borrows the handle, so the whole generation stays in one device task.
             let mut full_text = String::new();
             for _ in 0..MAX_VLM_STREAM_READS {
                 let (token, status) = stream.read_next(timeout_ms)?;
                 full_text.push_str(&token);
-                let _ = tx.send(sse_data_event(json!({"token": token})));
+                let _ = work_tx.send(sse_data_event(json!({"token": token})));
                 if !status.is_generating() {
-                    let _ = tx.send(sse_data_event(
+                    let _ = work_tx.send(sse_data_event(
                         json!({"done": true, "full_text": full_text}),
                     ));
                     return Ok(());
                 }
             }
-            let _ = tx.send(sse_data_event(
+            let _ = work_tx.send(sse_data_event(
                 json!({"error": format!("generation exceeded {MAX_VLM_STREAM_READS} token reads without reaching a terminal state")}),
             ));
             Ok(())
-        })();
+        })
+        .await;
         if let Err(error) = result {
-            let _ = tx.send(sse_data_event(json!({"error": error.to_string()})));
+            let _ = tx.send(sse_data_event(sse_hailort_error(error)));
         }
     });
 
@@ -1418,6 +1673,8 @@ async fn infer_wd(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(hailo_stub)]
+    use crate::hailort::stub_counts;
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
@@ -1442,6 +1699,227 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(MediaPreprocessError::Busy)));
+    }
+
+    #[tokio::test]
+    async fn panicking_device_work_does_not_stop_the_thread() {
+        let panicked = run_hailort_task(|_| -> HailoRtResult<()> {
+            panic!("device work panic");
+        })
+        .await;
+        assert_eq!(panicked.unwrap_err().to_string(), "HailoRT task panicked");
+
+        let next = run_hailort_task(|_| Ok(42)).await;
+        assert_eq!(next.unwrap(), 42);
+    }
+
+    #[cfg(hailo_stub)]
+    #[test]
+    fn same_create_key_reuses_one_handle() {
+        let before = stub_counts();
+        let mut ctx = DeviceCtx::default();
+        ctx.llm("same.hef", Some("adapter"), true).unwrap();
+        ctx.llm("same.hef", Some("adapter"), true).unwrap();
+        let after = stub_counts();
+
+        assert_eq!(after.llm_create - before.llm_create, 1);
+    }
+
+    #[cfg(hailo_stub)]
+    #[test]
+    fn create_keys_include_non_path_arguments() {
+        let mut llm_ctx = DeviceCtx::default();
+        llm_ctx.llm("same.hef", None, false).unwrap();
+        assert!(matches!(
+            llm_ctx.llm("same.hef", Some("adapter"), false),
+            Err(HailoRtError::GenAiConflict { .. })
+        ));
+        assert!(matches!(
+            llm_ctx.llm("same.hef", None, true),
+            Err(HailoRtError::GenAiConflict { .. })
+        ));
+
+        let mut vlm_ctx = DeviceCtx::default();
+        vlm_ctx.vlm("same.hef", false).unwrap();
+        assert!(matches!(
+            vlm_ctx.vlm("same.hef", true),
+            Err(HailoRtError::GenAiConflict { .. })
+        ));
+    }
+
+    #[cfg(hailo_stub)]
+    #[test]
+    fn infer_model_allows_two_different_hefs() {
+        let before = stub_counts();
+        let mut ctx = DeviceCtx::default();
+        ctx.infer_model("yolo.hef").unwrap();
+        ctx.infer_model("clip.hef").unwrap();
+        let after = stub_counts();
+
+        assert_eq!(after.yolo_create - before.yolo_create, 2);
+    }
+
+    #[cfg(hailo_stub)]
+    #[test]
+    fn different_genai_hef_names_the_resident_hef() {
+        let before = stub_counts();
+        let mut ctx = DeviceCtx::default();
+        ctx.llm("resident.hef", None, false).unwrap();
+        let error = match ctx.vlm("requested.hef", false) {
+            Ok(_) => panic!("expected a conflicting GenAI HEF error"),
+            Err(error) => error,
+        };
+        let after = stub_counts();
+
+        assert!(matches!(
+            &error,
+            HailoRtError::GenAiConflict { loaded, requested }
+                if loaded == "resident.hef" && requested == "requested.hef"
+        ));
+        assert!(error.to_string().contains("resident.hef"));
+        assert_eq!(after.vlm_create - before.vlm_create, 0);
+        assert_eq!(
+            HailoTaskError::HailoRt(error).status_code(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[cfg(hailo_stub)]
+    #[test]
+    fn speech2text_is_never_cached() {
+        let before = stub_counts();
+        let mut ctx = DeviceCtx::default();
+        drop(ctx.speech2text("speech.hef").unwrap());
+        drop(ctx.speech2text("speech.hef").unwrap());
+        let after = stub_counts();
+
+        assert_eq!(after.s2t_create - before.s2t_create, 2);
+        assert_eq!(after.s2t_release - before.s2t_release, 2);
+    }
+
+    #[cfg(hailo_stub)]
+    #[test]
+    fn reused_llm_is_cleared_before_second_generation() {
+        let mut ctx = DeviceCtx::default();
+        ctx.llm_for_generation("chat.hef", None, false)
+            .unwrap()
+            .generate_text("turn one", 1)
+            .unwrap();
+        let after_first = stub_counts();
+
+        ctx.llm_for_generation("chat.hef", None, false)
+            .unwrap()
+            .generate_text("turn two", 1)
+            .unwrap();
+        let after_second = stub_counts();
+
+        assert_eq!(
+            after_second.llm_clear_context,
+            after_first.llm_clear_context + 1,
+            "clear_context must run before the second generation on a reused handle"
+        );
+    }
+
+    #[cfg(hailo_stub)]
+    #[test]
+    fn conversation_b_does_not_inherit_conversation_a() {
+        let mut ctx = DeviceCtx::default();
+        let first = ctx
+            .llm_for_generation("chat.hef", None, false)
+            .unwrap()
+            .generate_text("conversation A", 1)
+            .unwrap();
+        let second = ctx
+            .llm_for_generation("chat.hef", None, false)
+            .unwrap()
+            .generate_text("conversation B", 1)
+            .unwrap();
+
+        assert_eq!(first, "conversation A");
+        assert_eq!(second, "conversation B");
+    }
+
+    #[cfg(hailo_stub)]
+    #[test]
+    fn panic_discards_the_active_handle() {
+        let before = stub_counts();
+        let mut ctx = DeviceCtx::default();
+        let result = ctx.run(|ctx| -> HailoRtResult<()> {
+            ctx.llm("panic.hef", None, false)?;
+            panic!("panic after handle acquisition");
+        });
+        assert!(matches!(result, Err(HailoTaskError::Panicked)));
+
+        ctx.run(|ctx| ctx.llm("panic.hef", None, false).map(|_| ()))
+            .unwrap();
+        let after = stub_counts();
+        assert_eq!(after.llm_release - before.llm_release, 1);
+        assert_eq!(after.llm_create - before.llm_create, 2);
+    }
+
+    #[cfg(hailo_stub)]
+    #[test]
+    fn panic_discard_cap_degrades_without_dropping_another_handle() {
+        let before = stub_counts();
+        let mut ctx = DeviceCtx::default();
+        for _ in 0..MAX_PANIC_HANDLE_DISCARDS {
+            let result = ctx.run(|ctx| -> HailoRtResult<()> {
+                ctx.llm("panic-cap.hef", None, false)?;
+                panic!("discardable panic");
+            });
+            assert!(matches!(result, Err(HailoTaskError::Panicked)));
+        }
+
+        let capped = ctx.run(|ctx| -> HailoRtResult<()> {
+            ctx.llm("panic-cap.hef", None, false)?;
+            panic!("panic past discard cap");
+        });
+        let capped_error = capped.unwrap_err();
+        assert!(matches!(&capped_error, HailoTaskError::Unavailable(_)));
+        assert_eq!(capped_error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+        let after_cap = stub_counts();
+        assert_eq!(
+            after_cap.llm_release - before.llm_release,
+            MAX_PANIC_HANDLE_DISCARDS
+        );
+
+        let next = ctx.run(|_| Ok(()));
+        assert!(matches!(next, Err(HailoTaskError::Unavailable(_))));
+        assert_eq!(
+            stub_counts().llm_release,
+            after_cap.llm_release,
+            "degraded mode must leave recovery to an operator reboot"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_work_is_serialized() {
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let first = run_hailort_task({
+            let order = order.clone();
+            move |_| {
+                order.lock().unwrap().push("first-start");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                order.lock().unwrap().push("first-end");
+                Ok(())
+            }
+        });
+        let second = run_hailort_task({
+            let order = order.clone();
+            move |_| {
+                order.lock().unwrap().push("second-start");
+                order.lock().unwrap().push("second-end");
+                Ok(())
+            }
+        });
+
+        let (first_result, second_result) = tokio::join!(first, second);
+        first_result.unwrap();
+        second_result.unwrap();
+        assert_eq!(
+            *order.lock().unwrap(),
+            ["first-start", "first-end", "second-start", "second-end"]
+        );
     }
 
     #[test]

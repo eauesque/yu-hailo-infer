@@ -3,11 +3,11 @@ use std::ptr::NonNull;
 
 use super::{check_status, ffi, HailoRtError, HailoRtResult};
 
-enum YuHailortLlm {}
+pub(super) enum YuHailortLlm {}
 enum YuHailortLlmStream {}
 
 extern "C" {
-    fn yu_hailort_llm_create(
+    pub(super) fn yu_hailort_llm_create(
         model_path: *const c_char,
         lora_name: *const c_char,
         optimize_memory_on_device: bool,
@@ -339,6 +339,69 @@ mod tests {
         let tokens = llm.tokenize("hello").expect("tokenize");
         assert!(!tokens.is_empty());
         assert!(llm.max_context_capacity().expect("capacity") > 0);
+    }
+
+    /// Measures whether dropping a handle reclaims CMA. This decides the shape
+    /// of the residency design: if CmaFree returns to baseline each cycle,
+    /// evict-then-create works; if it falls monotonically, the design must
+    /// instead share one process-lifetime VDevice, as the Python side does
+    /// (`device_manager_state.py:58` in yu_ai_manager keeps its VDevice for the
+    /// whole process because `device_manager_genai.py:95-96` records that
+    /// HailoRT 5.3.0 does not reclaim CMA on `VDevice.release()`).
+    ///
+    /// Aborts as soon as the answer is known. CMA exhaustion is irreversible
+    /// without a full reboot, so this must not keep cycling once CmaFree starts
+    /// falling — do not relax the floor.
+    ///
+    /// See `docs/superpowers/2026-08-08-measurement-request-cma-reclaim.md`.
+    #[test]
+    #[ignore = "requires a Hailo device (/dev/hailo0 or /dev/h1x-0, depending on driver generation) and HAILO_LLM_HEF"]
+    fn measure_cma_reclaim_across_create_drop_cycles() {
+        fn meminfo_kb(key: &str) -> u64 {
+            let text = std::fs::read_to_string("/proc/meminfo").expect("read meminfo");
+            text.lines()
+                .find_map(|line| line.strip_prefix(key))
+                .and_then(|rest| rest.trim().trim_end_matches(" kB").trim().parse().ok())
+                .unwrap_or_else(|| panic!("{key} not found in /proc/meminfo"))
+        }
+
+        let hef = std::env::var("HAILO_LLM_HEF").expect("HAILO_LLM_HEF");
+        let total = meminfo_kb("CmaTotal:");
+        let baseline = meminfo_kb("CmaFree:");
+        // Stop once a tenth of total CMA is gone: the answer is already "not
+        // reclaimed" by then, and continuing only risks the device.
+        let floor = baseline.saturating_sub(total / 10);
+        println!("CmaTotal {total} kB, baseline CmaFree {baseline} kB, abort floor {floor} kB");
+
+        for cycle in 0..20 {
+            let started = std::time::Instant::now();
+            {
+                let mut llm = Llm::create(&hef, None, false).expect("create llm");
+                let tokens = llm.tokenize("hello").expect("tokenize");
+                assert!(!tokens.is_empty());
+            } // handle dropped here — the measurement depends on this scope
+            let elapsed = started.elapsed();
+            let free = meminfo_kb("CmaFree:");
+            println!(
+                "cycle {cycle}: CmaFree {free} kB (delta from baseline {}), cycle took {elapsed:?}",
+                free as i64 - baseline as i64,
+            );
+            if free < floor {
+                println!("ABORT at cycle {cycle}: CMA is not being reclaimed. Do not rerun.");
+                return;
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        println!("after 10s settle: CmaFree {} kB", meminfo_kb("CmaFree:"));
+
+        // Secondary, needed under either design shape.
+        let mut llm = Llm::create(&hef, None, false).expect("create llm");
+        for i in 0..3 {
+            let started = std::time::Instant::now();
+            llm.clear_context().expect("clear_context");
+            println!("clear_context #{i} took {:?}", started.elapsed());
+        }
     }
 
     #[test]

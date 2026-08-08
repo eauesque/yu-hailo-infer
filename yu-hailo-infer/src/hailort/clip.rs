@@ -1,6 +1,6 @@
 use super::{
-    ffi::HAILO_FORMAT_TYPE_UINT8, load_yolo_metadata, run_yolo_once, HailoRtError, HailoRtResult,
-    VStreamInfo,
+    ffi::HAILO_FORMAT_TYPE_UINT8, load_yolo_metadata, run_yolo_once, shim::ShimYolo, yolo_metadata,
+    HailoRtError, HailoRtResult, VStreamInfo, YoloModelMetadata,
 };
 
 const CLIP_EMBEDDING_DIMENSION: usize = 512;
@@ -16,7 +16,10 @@ pub(crate) struct ClipImageMetadata {
 /// The underlying C++ shim is intentionally shared with YOLO: it performs
 /// generic HEF synchronous inference and contains no YOLO-specific behavior.
 pub(crate) fn load_clip_image_metadata(hef_path: &str) -> HailoRtResult<ClipImageMetadata> {
-    let metadata = load_yolo_metadata(hef_path)?;
+    validate_clip_image_metadata(load_yolo_metadata(hef_path)?)
+}
+
+fn validate_clip_image_metadata(metadata: YoloModelMetadata) -> HailoRtResult<ClipImageMetadata> {
     let input = metadata
         .inputs
         .into_iter()
@@ -45,13 +48,17 @@ pub(crate) fn load_clip_image_metadata(hef_path: &str) -> HailoRtResult<ClipImag
     Ok(ClipImageMetadata { input, output })
 }
 
+pub(crate) fn clip_image_metadata(model: &ShimYolo) -> HailoRtResult<ClipImageMetadata> {
+    validate_clip_image_metadata(yolo_metadata(model)?)
+}
+
 /// Runs a CLIP image HEF and converts its uint8 embedding to a normalized f32 vector.
-pub(crate) fn run_clip_image_once(hef_path: &str, input: &[u8]) -> HailoRtResult<Vec<f32>> {
-    let metadata = load_clip_image_metadata(hef_path)?;
+pub(crate) fn run_clip_image_once(model: &mut ShimYolo, input: &[u8]) -> HailoRtResult<Vec<f32>> {
+    let metadata = clip_image_metadata(model)?;
     if input.len() != metadata.input.frame_size {
         return Err(HailoRtError::InvalidMetadata("input buffer size mismatch"));
     }
-    let result = run_yolo_once(hef_path, input)?;
+    let result = run_yolo_once(model, input)?;
     let output = result
         .outputs
         .into_iter()
@@ -102,7 +109,8 @@ mod tests {
     fn smoke_clip_image_one_zero_frame_runs() {
         let hef = std::env::var("HAILO_CLIP_HEF").expect("HAILO_CLIP_HEF");
         let metadata = load_clip_image_metadata(&hef).expect("metadata");
-        let vector = run_clip_image_once(&hef, &vec![0u8; metadata.input.frame_size])
+        let mut model = ShimYolo::create(&hef).expect("create CLIP image model");
+        let vector = run_clip_image_once(&mut model, &vec![0u8; metadata.input.frame_size])
             .expect("one-frame inference");
         assert_eq!(vector.len(), CLIP_EMBEDDING_DIMENSION);
     }

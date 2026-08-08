@@ -32,6 +32,8 @@ pub async fn run() {
 
     let contract = startup::read_startup_contract(std::io::stdin())
         .expect("failed to read startup contract from stdin");
+    hailort::set_vdevice_group_id(&contract.vdevice_group_id)
+        .expect("failed to set HailoRT VDevice group ID");
     tracing::info!(
         scan_root_count = contract.scan_roots.len(),
         "yu-infer startup contract received"

@@ -17,6 +17,8 @@ pub(crate) enum HailoRtError {
     Nul(#[from] NulError),
     #[error("invalid HailoRT metadata: {0}")]
     InvalidMetadata(&'static str),
+    #[error("GenAI HEF {requested} conflicts with resident HEF {loaded}")]
+    GenAiConflict { requested: String, loaded: String },
 }
 
 impl HailoRtError {
@@ -27,7 +29,7 @@ impl HailoRtError {
     pub(crate) fn status_code(&self) -> Option<ffi::HailoStatus> {
         match self {
             Self::Status { code, .. } => Some(*code),
-            Self::Nul(_) | Self::InvalidMetadata(_) => None,
+            Self::Nul(_) | Self::InvalidMetadata(_) | Self::GenAiConflict { .. } => None,
         }
     }
 }

@@ -12,7 +12,9 @@ mod vlm;
 mod yolo;
 
 #[allow(unused_imports)]
-pub(crate) use clip::{load_clip_image_metadata, run_clip_image_once, ClipImageMetadata};
+pub(crate) use clip::{
+    clip_image_metadata, load_clip_image_metadata, run_clip_image_once, ClipImageMetadata,
+};
 #[allow(unused_imports)]
 pub(crate) use error::{check_status, HailoRtError, HailoRtResult};
 #[allow(unused_imports)]
@@ -21,14 +23,17 @@ pub(crate) use llm::{Llm, LlmChatMessage, LlmCompletionStatus, LlmGenerationPara
 pub(crate) use metadata::{QuantInfo, TensorShape, VStreamDirection, VStreamInfo};
 #[allow(unused_imports)]
 pub(crate) use safe::{ConfiguredNetworkGroup, Hef, VDevice};
+#[cfg(all(test, hailo_stub))]
+pub(crate) use shim::stub_counts;
+pub(crate) use shim::{set_vdevice_group_id, ShimYolo};
 #[allow(unused_imports)]
 pub(crate) use speech2text::{Speech2Text, Speech2TextTask};
 #[allow(unused_imports)]
 pub(crate) use vlm::{Vlm, VlmCompletionStatus, VlmGenerationParams, VlmStream};
 #[allow(unused_imports)]
 pub(crate) use yolo::{
-    load_yolo_metadata, run_yolo_once, validate_input_len, YoloInferenceResult, YoloModelMetadata,
-    YoloOutputBuffer,
+    load_yolo_metadata, run_yolo_once, validate_input_len, yolo_metadata, YoloInferenceResult,
+    YoloModelMetadata, YoloOutputBuffer,
 };
 
 #[cfg(test)]

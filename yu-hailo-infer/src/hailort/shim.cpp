@@ -1,4 +1,5 @@
 #include "hailo/hailort.hpp"
+#include "shim.h"
 
 #include <chrono>
 #include <cstdio>
@@ -8,160 +9,6 @@
 #include <memory>
 #include <string>
 #include <vector>
-
-extern "C" {
-
-struct YuHailortTensorInfo {
-    char name[128];
-    uint32_t height;
-    uint32_t width;
-    uint32_t features;
-    uint32_t format_type;
-    float qp_zp;
-    float qp_scale;
-    size_t frame_size;
-};
-
-struct YuHailortYoloMetadata {
-    size_t inputs_count;
-    size_t outputs_count;
-    YuHailortTensorInfo inputs[40];
-    YuHailortTensorInfo outputs[40];
-};
-
-struct YuHailortBuffer {
-    const char *name;
-    void *data;
-    size_t size;
-};
-
-struct YuHailortYolo;
-struct YuHailortSpeech2Text;
-struct YuHailortLlm;
-struct YuHailortLlmStream;
-struct YuHailortVlm;
-struct YuHailortVlmStream;
-
-int yu_hailort_yolo_create(const char *hef_path, YuHailortYolo **out);
-void yu_hailort_yolo_release(YuHailortYolo *ctx);
-int yu_hailort_yolo_metadata(const YuHailortYolo *ctx, YuHailortYoloMetadata *metadata);
-int yu_hailort_yolo_run(
-    YuHailortYolo *ctx,
-    const uint8_t *input,
-    size_t input_size,
-    YuHailortBuffer *outputs,
-    size_t outputs_count,
-    uint32_t timeout_ms);
-
-void yu_hailort_string_free(char *value);
-
-int yu_hailort_s2t_create(const char *model_path, YuHailortSpeech2Text **out);
-void yu_hailort_s2t_release(YuHailortSpeech2Text *ctx);
-int yu_hailort_s2t_generate_text(
-    YuHailortSpeech2Text *ctx,
-    const float *audio,
-    size_t audio_count,
-    int task,
-    const char *language,
-    float repetition_penalty,
-    uint32_t timeout_ms,
-    char **out_text);
-int yu_hailort_s2t_tokenize(
-    YuHailortSpeech2Text *ctx,
-    const char *text,
-    int *tokens,
-    size_t *tokens_count);
-
-int yu_hailort_llm_create(
-    const char *model_path,
-    const char *lora_name,
-    bool optimize_memory_on_device,
-    YuHailortLlm **out);
-void yu_hailort_llm_release(YuHailortLlm *ctx);
-int yu_hailort_llm_generate_text(
-    YuHailortLlm *ctx,
-    const char *prompt,
-    uint32_t timeout_ms,
-    char **out_text);
-int yu_hailort_llm_tokenize(
-    YuHailortLlm *ctx,
-    const char *text,
-    int *tokens,
-    size_t *tokens_count);
-int yu_hailort_llm_context_usage(YuHailortLlm *ctx, size_t *out);
-int yu_hailort_llm_max_context_capacity(YuHailortLlm *ctx, size_t *out);
-int yu_hailort_llm_clear_context(YuHailortLlm *ctx);
-int yu_hailort_llm_generate_stream_start(
-    YuHailortLlm *ctx,
-    const char *const *messages_json,
-    size_t messages_count,
-    const float *temperature,
-    const float *top_p,
-    const uint32_t *top_k,
-    const float *frequency_penalty,
-    const uint32_t *max_generated_tokens,
-    const bool *do_sample,
-    const uint32_t *seed,
-    YuHailortLlmStream **out);
-int yu_hailort_llm_stream_read(
-    YuHailortLlmStream *stream,
-    uint32_t timeout_ms,
-    char **out_token,
-    int *out_status);
-void yu_hailort_llm_stream_release(YuHailortLlmStream *stream);
-
-int yu_hailort_vlm_create(
-    const char *model_path,
-    bool optimize_memory_on_device,
-    YuHailortVlm **out);
-void yu_hailort_vlm_release(YuHailortVlm *ctx);
-int yu_hailort_vlm_generate_text(
-    YuHailortVlm *ctx,
-    const char *prompt,
-    const uint8_t *const *frames,
-    const size_t *frame_sizes,
-    size_t frame_count,
-    uint32_t timeout_ms,
-    char **out_text);
-int yu_hailort_vlm_tokenize(
-    YuHailortVlm *ctx,
-    const char *text,
-    int *tokens,
-    size_t *tokens_count);
-int yu_hailort_vlm_context_usage(YuHailortVlm *ctx, size_t *out);
-int yu_hailort_vlm_max_context_capacity(YuHailortVlm *ctx, size_t *out);
-int yu_hailort_vlm_clear_context(YuHailortVlm *ctx);
-int yu_hailort_vlm_input_frame_info(
-    YuHailortVlm *ctx,
-    uint32_t *frame_size,
-    uint32_t *height,
-    uint32_t *width,
-    uint32_t *features,
-    uint32_t *format_type,
-    uint32_t *format_order);
-
-int yu_hailort_vlm_generate_stream_start(
-    YuHailortVlm *ctx,
-    const char *prompt,
-    const char *system_prompt,
-    const uint8_t *const *frames,
-    const size_t *frame_sizes,
-    size_t frame_count,
-    const float *temperature,
-    const float *top_p,
-    const uint32_t *top_k,
-    const float *frequency_penalty,
-    const uint32_t *max_generated_tokens,
-    const bool *do_sample,
-    const uint32_t *seed,
-    YuHailortVlmStream **out);
-int yu_hailort_vlm_stream_read(
-    YuHailortVlmStream *stream,
-    uint32_t timeout_ms,
-    char **out_token,
-    int *out_status);
-void yu_hailort_vlm_stream_release(YuHailortVlmStream *stream);
-}
 
 struct YuHailortYolo {
     std::shared_ptr<hailort::VDevice> vdevice;
@@ -199,6 +46,38 @@ struct YuHailortVlmStream {
     std::unique_ptr<hailort::genai::VLMGenerator> generator;
     std::unique_ptr<hailort::genai::LLMGeneratorCompletion> completion;
 };
+
+static std::string &vdevice_group_id()
+{
+    static std::string group_id = "YU_SHARED";
+    return group_id;
+}
+
+int yu_hailort_set_vdevice_group_id(const char *group_id)
+{
+    if (nullptr == group_id) {
+        return HAILO_INVALID_ARGUMENT;
+    }
+    vdevice_group_id() = group_id;
+    return HAILO_SUCCESS;
+}
+
+static std::shared_ptr<hailort::VDevice> shared_vdevice(hailo_status &status)
+{
+    static hailo_status creation_status = HAILO_SUCCESS;
+    static std::shared_ptr<hailort::VDevice> vdevice = []() {
+        auto params = hailort::HailoRTDefaults::get_vdevice_params();
+        params.group_id = vdevice_group_id().c_str();
+        auto created = hailort::VDevice::create_shared(params);
+        if (!created) {
+            creation_status = created.status();
+            return std::shared_ptr<hailort::VDevice>();
+        }
+        return created.release();
+    }();
+    status = creation_status;
+    return vdevice;
+}
 
 static std::string escape_json_string(const std::string &input)
 {
@@ -290,12 +169,13 @@ int yu_hailort_yolo_create(const char *hef_path, YuHailortYolo **out)
     }
     *out = nullptr;
 
-    auto vdevice = hailort::VDevice::create_shared();
+    hailo_status vdevice_status;
+    auto vdevice = shared_vdevice(vdevice_status);
     if (!vdevice) {
-        return vdevice.status();
+        return vdevice_status;
     }
 
-    auto infer_model = vdevice.value()->create_infer_model(std::string(hef_path));
+    auto infer_model = vdevice->create_infer_model(std::string(hef_path));
     if (!infer_model) {
         return infer_model.status();
     }
@@ -306,7 +186,7 @@ int yu_hailort_yolo_create(const char *hef_path, YuHailortYolo **out)
     }
 
     auto ctx = std::make_unique<YuHailortYolo>();
-    ctx->vdevice = vdevice.release();
+    ctx->vdevice = vdevice;
     ctx->infer_model = infer_model.release();
     ctx->configured = std::make_unique<hailort::ConfiguredInferModel>(configured.release());
     auto status = fill_metadata(ctx.get());
@@ -392,19 +272,20 @@ int yu_hailort_s2t_create(const char *model_path, YuHailortSpeech2Text **out)
     }
     *out = nullptr;
 
-    auto vdevice = hailort::VDevice::create_shared();
+    hailo_status vdevice_status;
+    auto vdevice = shared_vdevice(vdevice_status);
     if (!vdevice) {
-        return vdevice.status();
+        return vdevice_status;
     }
 
     auto params = hailort::genai::Speech2TextParams(std::string_view(model_path));
-    auto speech2text = hailort::genai::Speech2Text::create(vdevice.value(), params);
+    auto speech2text = hailort::genai::Speech2Text::create(vdevice, params);
     if (!speech2text) {
         return speech2text.status();
     }
 
     auto ctx = std::make_unique<YuHailortSpeech2Text>();
-    ctx->vdevice = vdevice.release();
+    ctx->vdevice = vdevice;
     ctx->speech2text = std::make_unique<hailort::genai::Speech2Text>(speech2text.release());
     *out = ctx.release();
     return HAILO_SUCCESS;
@@ -498,21 +379,22 @@ int yu_hailort_llm_create(
     }
     *out = nullptr;
 
-    auto vdevice = hailort::VDevice::create_shared();
+    hailo_status vdevice_status;
+    auto vdevice = shared_vdevice(vdevice_status);
     if (!vdevice) {
-        return vdevice.status();
+        return vdevice_status;
     }
     auto params = hailort::genai::LLMParams(
         std::string(model_path),
         (nullptr == lora_name) ? std::string() : std::string(lora_name),
         optimize_memory_on_device);
-    auto llm = hailort::genai::LLM::create(vdevice.value(), params);
+    auto llm = hailort::genai::LLM::create(vdevice, params);
     if (!llm) {
         return llm.status();
     }
 
     auto ctx = std::make_unique<YuHailortLlm>();
-    ctx->vdevice = vdevice.release();
+    ctx->vdevice = vdevice;
     ctx->llm = std::make_unique<hailort::genai::LLM>(llm.release());
     *out = ctx.release();
     return HAILO_SUCCESS;
@@ -755,18 +637,19 @@ int yu_hailort_vlm_create(
     }
     *out = nullptr;
 
-    auto vdevice = hailort::VDevice::create_shared();
+    hailo_status vdevice_status;
+    auto vdevice = shared_vdevice(vdevice_status);
     if (!vdevice) {
-        return vdevice.status();
+        return vdevice_status;
     }
     auto params = hailort::genai::VLMParams(std::string(model_path), optimize_memory_on_device);
-    auto vlm = hailort::genai::VLM::create(vdevice.value(), params);
+    auto vlm = hailort::genai::VLM::create(vdevice, params);
     if (!vlm) {
         return vlm.status();
     }
 
     auto ctx = std::make_unique<YuHailortVlm>();
-    ctx->vdevice = vdevice.release();
+    ctx->vdevice = vdevice;
     ctx->vlm = std::make_unique<hailort::genai::VLM>(vlm.release());
     *out = ctx.release();
     return HAILO_SUCCESS;
