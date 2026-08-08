@@ -7,6 +7,58 @@
 
 ---
 
+## [0.2.0] - 2026-08-08
+
+Hailo-10H 実機で検証済み。主眼はモデル常駐で、これは性能改善ではなく、機能が成立する
+唯一の形である —— HailoRT 5.3.0 は解放しても CMA を返さないため、請求毎にモデルを
+作って捨てる従来の形は 1 請求あたり約 59 MiB を永久に失い、512 MiB のプールでは実質
+「1 boot につき 1 リクエスト」しか成立していなかった。
+
+### Added
+
+- **プロセス寿命の単一 `VDevice`。** 従来は種別ごとに 4 箇所で `VDevice::create_shared()`
+  を呼んでいた。Hailo-10H は物理デバイスが 1 つで、同一プロセスに 2 つ作ると
+  `HAILO_OUT_OF_PHYSICAL_DEVICES(74)` になる。さらに実測では、**同じ group_id でも
+  別インスタンス上に作ったモデルは `InferModel.run()` で失敗する**。解放はしない ——
+  `VDevice.release()` は CMA を返さないので、解放は何も達成しない。
+- **`vdevice_group_id` を起動契約で受け取る。** 省略時は環境変数
+  `HAILO_VDEVICE_GROUP_ID` → `"YU_SHARED"` の順に落ちる。これにより、同じ group_id を
+  使う別プロセス（yu_ai_manager の Python 拡張など）とデバイスを共有できる。実機で
+  確認済み: Python 側が LLM を保持したまま、sidecar の CLIP が動作する。
+- **モデルハンドルの常駐。** 鍵は create 引数の全体。InferModel 級（YOLO/CLIP）は別 HEF
+  でも併存でき、GenAI 級（LLM/VLM）は同時 1 つで、別 HEF の要求には現在載っている HEF を
+  添えて 409 を返す。`Speech2Text` は `clear_context` を持たないため常駐させない。
+- **専有デバイススレッド。** モデルハンドルは `!Send` なので、グローバル mutex を
+  ハンドルを所有するスレッドへ置き換えた。閉包と結果だけがスレッドを跨ぐため、
+  `unsafe impl Send` は 1 つも使っていない。各作業単位は `catch_unwind` で囲む。
+
+### Fixed
+
+- **常駐が chat を 2 ターン目で壊すところだった。** HailoRT は `system` role を文脈が
+  空のときのみ受け付ける。呼出側は毎ターン system を送るため、ハンドルを使い回すと
+  `System role messages can only be provided on the first prompt` で失敗する。
+  ⟹ **生成のたびに `clear_context()` を呼ぶ。** 実機で差分測定により確認済み ——
+  この 1 行を外すとターン 2 が `HAILO_INVALID_OPERATION(6)` で落ち、戻すと通る。
+- **メディア前処理の資源を上限で縛った。** 画像・音声のデコードが最悪時に確保する
+  作業領域をあらかじめ予約し、超える要求は待たせずに拒否する。
+- **HailoRT SDK の無い環境で自前のゲートが通らなかった**のを修正し、CI を追加した。
+
+### Changed
+
+- **2 つの shim 実装に共有宣言ヘッダ（`src/hailort/shim.h`）を導入した。** `build.rs` は
+  SDK の有無で `shim.cpp` / `shim_stub.cpp` を切り替えるが、`extern "C"` は arity を
+  記号名に含めないため、片方だけ変更しても両環境でコンパイル・リンク・試験が通り、
+  実行時に沈黙する未定義動作になっていた。**ただしこれが閉じるのは C++ 同士の面のみで、
+  Rust の `ffi.rs` は手写しのままである。**
+
+### Known limitations
+
+- **推論中に約 14 MB/分の CMA leak がある**（load/unload とは独立の別経路）。常駐でも
+  消えず、30 分以上の連続セッションは Pi の再起動を挟まないと安定しない。
+- CMA は Pi 本体の再起動でしか回収されない。プロセス終了でも戻らないことを実測で確認済み。
+
+---
+
 ## [0.1.0] - 2026-07-20
 
 初回公開リリース。本推論基盤が元々開発されていた [yu_ai_manager](https://github.com/eauesque/yu_ai_manager)

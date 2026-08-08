@@ -7,6 +7,72 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.2.0] - 2026-08-08
+
+Verified on Hailo-10H hardware. The main change is model residency, which is not
+a performance optimisation but the only shape in which the service works at all:
+HailoRT 5.3.0 does not return CMA when a model is released, so the previous
+create-and-drop-per-request design permanently lost roughly 59 MiB per request
+and, against a 512 MiB pool, allowed about one request per boot.
+
+### Added
+
+- **A single process-lifetime `VDevice`.** Previously `VDevice::create_shared()`
+  was called in four places, once per model kind. The Hailo-10H has exactly one
+  physical device, and creating two `VDevice` instances in one process fails with
+  `HAILO_OUT_OF_PHYSICAL_DEVICES(74)`. Measured further: **even with the same
+  group_id, models created on separate instances fail at `InferModel.run()`.**
+  The device is never released — `VDevice.release()` does not reclaim CMA, so
+  releasing accomplishes nothing.
+- **`vdevice_group_id` in the startup contract.** When absent it falls back to the
+  `HAILO_VDEVICE_GROUP_ID` environment variable, then to `"YU_SHARED"`. This lets
+  the sidecar share the device with another process using the same group id — for
+  example the Python extension in yu_ai_manager. Confirmed on hardware: the
+  sidecar's CLIP encoder runs while the Python side holds an LLM.
+- **Resident model handles**, keyed by the whole create-argument tuple.
+  InferModel-class handles (YOLO, CLIP) may coexist with different HEFs;
+  GenAI-class handles (LLM, VLM) are limited to one at a time, and a request for a
+  different GenAI HEF returns 409 naming the HEF currently loaded. `Speech2Text`
+  is not made resident because it has no `clear_context`.
+- **A dedicated device thread.** Model handles are `!Send`, so the global mutex was
+  replaced by a thread that owns them. Only closures and results cross the thread
+  boundary, so no `unsafe impl Send` was introduced anywhere. Each work item runs
+  under `catch_unwind`.
+
+### Fixed
+
+- **Residency would have broken chat on the second turn.** HailoRT accepts a
+  `system` role message only while the context is empty, and the caller sends one
+  every turn, so reusing a handle fails with `System role messages can only be
+  provided on the first prompt`. ⟹ **`clear_context()` is now called before every
+  generation.** Confirmed on hardware by differential measurement: removing that
+  one line makes turn 2 fail with `HAILO_INVALID_OPERATION(6)`; restoring it makes
+  the turn pass.
+- **Bounded the resources media preprocessing may hold.** Image and audio decoding
+  now reserve their worst-case working set up front and reject requests that
+  exceed it rather than queueing them.
+- **The no-HailoRT build did not pass its own gate**; fixed, and CI added.
+
+### Changed
+
+- **The two shim implementations now share one declaration header
+  (`src/hailort/shim.h`).** `build.rs` compiles `shim.cpp` or `shim_stub.cpp`
+  depending on whether the SDK is present, and because `extern "C"` encodes
+  neither arity nor types in the symbol name, changing one without the other
+  compiled, linked and passed tests on both machines while being silent undefined
+  behaviour at runtime. **Note that this closes the C++-to-C++ face only — Rust's
+  `ffi.rs` still mirrors these declarations by hand.**
+
+### Known limitations
+
+- **A continuous CMA leak of roughly 14 MB/min occurs during inference**, on a path
+  independent of load/unload. Residency does not remove it; sessions longer than
+  about 30 minutes need a Pi reboot to stay stable.
+- CMA is reclaimed only by rebooting the Pi. Process exit does not return it —
+  measured.
+
+---
+
 ## [0.1.0] - 2026-07-20
 
 First public release. Extracted from the [yu_ai_manager](https://github.com/eauesque/yu_ai_manager)
