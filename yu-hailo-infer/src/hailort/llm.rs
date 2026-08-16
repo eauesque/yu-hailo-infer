@@ -36,6 +36,8 @@ extern "C" {
         ctx: *mut YuHailortLlm,
         messages_json: *const *const c_char,
         messages_count: usize,
+        tools_json: *const *const c_char,
+        tools_count: usize,
         temperature: *const f32,
         top_p: *const f32,
         top_k: *const u32,
@@ -219,6 +221,7 @@ impl<'a> LlmStream<'a> {
     pub(crate) fn start(
         llm: &'a mut Llm,
         messages: &[LlmChatMessage],
+        tools: &[String],
         params: LlmGenerationParams,
     ) -> HailoRtResult<Self> {
         let message_jsons = messages
@@ -231,14 +234,25 @@ impl<'a> LlmStream<'a> {
             .collect::<Result<Vec<_>, _>>()?;
         let message_ptrs: Vec<*const c_char> =
             message_jsons.iter().map(|value| value.as_ptr()).collect();
+        // Each entry is already a caller-serialized tool-definition JSON string
+        // (e.g. `{"name":...,"description":...,"parameters":...}`), passed
+        // through as-is rather than re-derived from a typed struct — tool
+        // schemas are open-ended and callers already receive them as JSON.
+        let tool_jsons = tools
+            .iter()
+            .map(|tool| CString::new(tool.as_str()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let tool_ptrs: Vec<*const c_char> = tool_jsons.iter().map(|value| value.as_ptr()).collect();
         let mut out = std::ptr::null_mut();
-        // SAFETY: message C strings, optional-override pointers, and out
+        // SAFETY: message/tool C strings, optional-override pointers, and out
         // pointer are all valid until the call returns.
         let status = unsafe {
             yu_hailort_llm_generate_stream_start(
                 llm.raw.as_ptr(),
                 message_ptrs.as_ptr(),
                 message_ptrs.len(),
+                tool_ptrs.as_ptr(),
+                tool_ptrs.len(),
                 params
                     .temperature
                     .as_ref()
@@ -424,6 +438,7 @@ mod tests {
                     content: "What is the capital of France?".to_string(),
                 },
             ],
+            &[],
             LlmGenerationParams {
                 temperature: Some(0.7),
                 top_p: Some(0.9),
@@ -445,5 +460,53 @@ mod tests {
             status = next_status;
         }
         assert!(!text.is_empty());
+    }
+
+    /// Exercises the native tool-call path (`write(messages, tools)`): passes
+    /// one tool definition and prints the raw model output so a human can
+    /// inspect what tool-call syntax this HEF's chat template actually
+    /// produces (llama.cpp/OpenAI-style JSON, a model-specific special-token
+    /// format, or plain prose ignoring the tool entirely — this is
+    /// model-dependent and not asserted here). See TODO.md
+    /// (hailo-genai, native tool-call investigation) for why this needs
+    /// hardware to answer at all.
+    #[test]
+    #[ignore = "requires a Hailo device (/dev/hailo0 or /dev/h1x-0, depending on driver generation) and HAILO_LLM_HEF"]
+    fn smoke_llm_generate_stream_with_tools_prints_raw_model_output() {
+        let hef = std::env::var("HAILO_LLM_HEF").expect("HAILO_LLM_HEF");
+        let mut llm = Llm::create(&hef, None, false).expect("create llm");
+        let tool = serde_json::json!({
+            "name": "get_weather",
+            "description": "Get the current weather for a city",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string", "description": "City name"}},
+                "required": ["city"],
+            },
+        })
+        .to_string();
+        let mut stream = LlmStream::start(
+            &mut llm,
+            &[LlmChatMessage {
+                role: "user".to_string(),
+                content: "What's the weather in Tokyo?".to_string(),
+            }],
+            &[tool],
+            LlmGenerationParams {
+                max_generated_tokens: Some(64),
+                ..Default::default()
+            },
+        )
+        .expect("generate_stream_start with a tool definition");
+
+        let mut text = String::new();
+        let mut status = LlmCompletionStatus::Generating;
+        while status.is_generating() {
+            let (token, next_status) = stream.read_next(60_000).expect("stream_read");
+            text.push_str(&token);
+            status = next_status;
+        }
+        assert!(!text.is_empty());
+        eprintln!("LLM tool-call raw output: {text:?}");
     }
 }

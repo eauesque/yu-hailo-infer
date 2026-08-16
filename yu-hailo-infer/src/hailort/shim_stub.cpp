@@ -139,7 +139,7 @@ int yu_hailort_llm_clear_context(YuHailortLlm *ctx)
     ++llm_clear_context_count;
     return 0;
 }
-int yu_hailort_llm_generate_stream_start(YuHailortLlm *, const char *const *, size_t, const float *, const float *, const uint32_t *, const float *, const uint32_t *, const bool *, const uint32_t *, YuHailortLlmStream **) { return HAILO_STUB_ERR; }
+int yu_hailort_llm_generate_stream_start(YuHailortLlm *, const char *const *, size_t, const char *const *, size_t, const float *, const float *, const uint32_t *, const float *, const uint32_t *, const bool *, const uint32_t *, YuHailortLlmStream **) { return HAILO_STUB_ERR; }
 int yu_hailort_llm_stream_read(YuHailortLlmStream *, uint32_t, char **, int *) { return HAILO_STUB_ERR; }
 void yu_hailort_llm_stream_release(YuHailortLlmStream *) {}
 

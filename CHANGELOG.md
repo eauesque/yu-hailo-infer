@@ -7,6 +7,24 @@
 
 ---
 
+## [0.3.0] - 2026-08-16
+
+Hailo-10H 実機で検証済み。`/v1/infer/llm/generate/stream` にネイティブ tool 呼出し対応
+（HailoRT genai `LLMGenerator::write(messages, tools)`）を配線した。
+
+### Added
+
+- **LLM ストリーミング生成に `tools` フィールドを追加。** リクエスト JSON に OpenAI 形式の
+  tool 定義配列（`{"name":...,"description":...,"parameters":...}`）を渡せるようにした。
+  `shim.cpp`/`shim.h`/`shim_stub.cpp`/`llm.rs` の C ABI・Rust バインディングに
+  `tools_json`/`tools_count` 引数を追加し、HailoRT SDK の `write(prompt_json_strings,
+  tools_json_strings)` へ橋渡しする。既存呼出し元は空配列を渡すだけで従来どおり動作する
+  （後方互換）。`MAX_LLM_TOOLS`（64件）・合計バイト数（`MAX_PROMPT_BYTES` と同じ上限）の
+  検証を追加。
+- 実機（Qwen3-1.7B-Instruct.hef）で tool 定義を渡した生成を検証。モデルは
+  `<tool_call>\n{"name": "...", "arguments": {...}}\n</tool_call>` 形式（Qwen 独自の
+  function-calling 構文）で応答することを確認した。
+
 ## [0.2.0] - 2026-08-08
 
 Hailo-10H 実機で検証済み。主眼はモデル常駐で、これは性能改善ではなく、機能が成立する

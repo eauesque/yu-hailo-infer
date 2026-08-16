@@ -501,6 +501,8 @@ int yu_hailort_llm_generate_stream_start(
     YuHailortLlm *ctx,
     const char *const *messages_json,
     size_t messages_count,
+    const char *const *tools_json,
+    size_t tools_count,
     const float *temperature,
     const float *top_p,
     const uint32_t *top_k,
@@ -511,7 +513,7 @@ int yu_hailort_llm_generate_stream_start(
     YuHailortLlmStream **out)
 {
     if ((nullptr == ctx) || (nullptr == out) || (0 == messages_count)
-        || (nullptr == messages_json)) {
+        || (nullptr == messages_json) || ((0 != tools_count) && (nullptr == tools_json))) {
         return HAILO_INVALID_ARGUMENT;
     }
     *out = nullptr;
@@ -527,6 +529,20 @@ int yu_hailort_llm_generate_stream_start(
             return HAILO_INVALID_ARGUMENT;
         }
         messages.emplace_back(messages_json[i]);
+    }
+
+    // Each entry is a caller-built {"name":...,"description":...,"parameters":...}
+    // JSON string, per the SDK's write(prompt_json_strings, tools_json_strings)
+    // contract. The SDK docs state tools may only be provided on a fresh
+    // context — the caller (this shim's callers all clear_context() before
+    // every generation) guarantees that, so no fresh-context check is done here.
+    std::vector<std::string> tools;
+    tools.reserve(tools_count);
+    for (size_t i = 0; i < tools_count; ++i) {
+        if (nullptr == tools_json[i]) {
+            return HAILO_INVALID_ARGUMENT;
+        }
+        tools.emplace_back(tools_json[i]);
     }
 
     auto params = ctx->llm->create_generator_params();
@@ -585,7 +601,7 @@ int yu_hailort_llm_generate_stream_start(
         return generator.status();
     }
     auto generator_ptr = std::make_unique<hailort::genai::LLMGenerator>(generator.release());
-    auto write_status = generator_ptr->write(messages);
+    auto write_status = generator_ptr->write(messages, tools);
     if (HAILO_SUCCESS != write_status) {
         return write_status;
     }

@@ -96,6 +96,8 @@ int yu_hailort_llm_generate_stream_start(
     YuHailortLlm *ctx,
     const char *const *messages_json,
     size_t messages_count,
+    const char *const *tools_json,
+    size_t tools_count,
     const float *temperature,
     const float *top_p,
     const uint32_t *top_k,

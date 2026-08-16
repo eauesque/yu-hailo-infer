@@ -52,6 +52,9 @@ const MAX_LLM_STREAM_READS: usize = 8192;
 /// Upper bound on the number of chat turns accepted per request — a
 /// generously large multi-turn history, not a realistic conversation length.
 const MAX_LLM_MESSAGES: usize = 256;
+/// Upper bound on the number of tool definitions accepted per request — a
+/// generously large tool set, not a realistic agent tool count.
+const MAX_LLM_TOOLS: usize = 64;
 const MAX_PANIC_HANDLE_DISCARDS: usize = 3;
 const HAILORT_DEGRADED_MESSAGE: &str =
     "HailoRT handle discard limit reached; reboot required before further inference";
@@ -270,6 +273,13 @@ pub struct LlmGenerateStreamRequest {
     /// {"role":"assistant",...}, {"role":"user",...}]`) — the HailoRT chat
     /// template renders the whole exchange, not just the latest turn.
     messages: Vec<LlmChatMessageRequest>,
+    /// Tool definitions (OpenAI-function-style objects, e.g.
+    /// `{"name":...,"description":...,"parameters":...}`), forwarded as-is to
+    /// the HailoRT SDK's native `write(messages, tools)` so the model's own
+    /// chat template renders them (rather than the caller embedding a tool
+    /// listing into a prose system prompt). Empty/absent means no tools.
+    #[serde(default)]
+    tools: Vec<serde_json::Value>,
     /// Per-token read timeout, not an overall generation deadline.
     timeout_ms: Option<u32>,
     temperature: Option<f32>,
@@ -1254,6 +1264,26 @@ async fn llm_generate_stream(
             format!("combined message content exceeds {MAX_PROMPT_BYTES} bytes"),
         );
     }
+    if body.tools.len() > MAX_LLM_TOOLS {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "llm_too_many_tools",
+            format!("at most {MAX_LLM_TOOLS} tools are allowed"),
+        );
+    }
+    let tools: Vec<String> = body
+        .tools
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect();
+    let total_tool_bytes: usize = tools.iter().map(String::len).sum();
+    if total_tool_bytes > MAX_PROMPT_BYTES {
+        return api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "tools_too_large",
+            format!("combined tool definitions exceed {MAX_PROMPT_BYTES} bytes"),
+        );
+    }
     if let Some(max_generated_tokens) = body.max_generated_tokens {
         if max_generated_tokens > MAX_LLM_GENERATED_TOKENS {
             return api_error(
@@ -1302,7 +1332,7 @@ async fn llm_generate_stream(
         let result = run_hailort_task(move |ctx| {
             let llm = ctx.llm_for_generation(&hef_path_str, None, false)?;
             // LlmStream borrows the handle, so the whole generation stays in one device task.
-            let mut stream = LlmStream::start(llm, &messages, params)?;
+            let mut stream = LlmStream::start(llm, &messages, &tools, params)?;
             let mut full_text = String::new();
             for _ in 0..MAX_LLM_STREAM_READS {
                 let (token, status) = stream.read_next(timeout_ms)?;
@@ -2241,6 +2271,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn llm_generate_stream_rejects_too_many_tools() {
+        let app = build_router(test_state(vec![]));
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": (0..MAX_LLM_TOOLS + 1)
+                .map(|i| json!({"name": format!("tool_{i}")}))
+                .collect::<Vec<_>>(),
+        })
+        .to_string();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/infer/llm/generate/stream")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn llm_generate_stream_rejects_oversized_tools() {
+        let app = build_router(test_state(vec![]));
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "big", "description": "a".repeat(MAX_PROMPT_BYTES + 1)}],
+        })
+        .to_string();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/infer/llm/generate/stream")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]

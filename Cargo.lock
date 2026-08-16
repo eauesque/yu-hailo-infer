@@ -2641,7 +2641,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "yu-hailo-auth"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hex",
  "rand 0.9.5",
@@ -2650,7 +2650,7 @@ dependencies = [
 
 [[package]]
 name = "yu-hailo-infer"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2673,7 +2673,7 @@ dependencies = [
 
 [[package]]
 name = "yu-hailo-infer-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "csv",
  "image",

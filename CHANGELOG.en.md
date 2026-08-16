@@ -7,6 +7,25 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.3.0] - 2026-08-16
+
+Verified on Hailo-10H hardware. Wires native tool-call support (HailoRT genai
+`LLMGenerator::write(messages, tools)`) into `/v1/infer/llm/generate/stream`.
+
+### Added
+
+- **`tools` field on the LLM streaming generation request.** Accepts an array of
+  OpenAI-style tool definitions (`{"name":...,"description":...,"parameters":...}`)
+  in the request JSON. Added `tools_json`/`tools_count` arguments through the C
+  ABI and Rust binding (`shim.cpp`/`shim.h`/`shim_stub.cpp`/`llm.rs`), forwarding
+  to the HailoRT SDK's `write(prompt_json_strings, tools_json_strings)`. Existing
+  callers keep working unchanged by passing an empty array (backward compatible).
+  Added validation for `MAX_LLM_TOOLS` (64) and a combined byte-size cap (same
+  bound as `MAX_PROMPT_BYTES`).
+- Verified on hardware (Qwen3-1.7B-Instruct.hef) that passing tool definitions
+  makes the model respond in `<tool_call>\n{"name": "...", "arguments": {...}}\n
+  </tool_call>` form — Qwen's own native function-calling syntax.
+
 ## [0.2.0] - 2026-08-08
 
 Verified on Hailo-10H hardware. The main change is model residency, which is not
