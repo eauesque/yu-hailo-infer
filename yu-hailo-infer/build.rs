@@ -4,6 +4,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/hailort/shim.cpp");
     println!("cargo:rerun-if-changed=src/hailort/shim_stub.cpp");
     println!("cargo:rerun-if-env-changed=HAILO_INCLUDE_DIR");
+    println!("cargo:rerun-if-env-changed=HAILO_LIB_DIR");
 
     // /usr/local wins over /usr: a HailoRT version built from source (no
     // .deb available yet, e.g. 5.4.0) installs under /usr/local, and must be
@@ -31,6 +32,17 @@ fn main() {
             .flag_if_supported("-std=c++17");
         if let Some(dir) = &env_include {
             build.include(dir);
+            // HAILO_INCLUDE_DIR overrides the header search but must still
+            // pair with a matching -L, or a custom SDK install hits the
+            // same stale-library bug this fix exists for. HAILO_LIB_DIR
+            // overrides the derived guess when the layout isn't the usual
+            // <prefix>/include + <prefix>/lib sibling pair.
+            let lib_dir = std::env::var("HAILO_LIB_DIR").unwrap_or_else(|_| {
+                dir.strip_suffix("/include")
+                    .map(|prefix| format!("{prefix}/lib"))
+                    .unwrap_or_else(|| dir.clone())
+            });
+            println!("cargo:rustc-link-search=native={lib_dir}");
         } else if let Some(prefix) = ["/usr/local", "/usr"]
             .iter()
             .find(|prefix| std::path::Path::new(prefix).join("include/hailo/hailort.hpp").exists())
