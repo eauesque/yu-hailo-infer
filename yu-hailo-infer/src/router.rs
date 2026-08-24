@@ -183,6 +183,16 @@ pub struct InferWdRequest {
     pub general_thr: f32,
     #[serde(default = "default_character_thr")]
     pub character_thr: f32,
+    /// Full inference recipe, resolved by yu-server from its profile
+    /// registry. Absent means the built-in WD recipe, which is what every
+    /// caller predating this field expects.
+    ///
+    /// `default_thresholds` inside it is the *resolved* threshold table: the
+    /// caller has already decided whether the user's configured thresholds or
+    /// the profile's own defaults win, because that decision differs per
+    /// adapter family and belongs with the registry, not here.
+    #[serde(default)]
+    pub profile: Option<infer_core::WdProfileSpec>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1648,8 +1658,22 @@ async fn infer_wd(
             .into_response();
     }
 
+    let profile_applied = body.profile.is_some();
+    let spec = body.profile.clone().unwrap_or_else(|| {
+        infer_core::builtin_wd_profile("model.onnx", body.general_thr, body.character_thr)
+    });
+    if let Err(error) = spec.validate() {
+        // A recipe this build cannot reproduce is reported, never
+        // approximated: an approximation returns confident wrong tags.
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "unsupported profile", "detail": error.to_string()})),
+        )
+            .into_response();
+    }
+
     let model_dir = state.wd_cache_dir.join(&body.model_id);
-    if !infer_core::is_model_downloaded(&state.wd_cache_dir, &body.model_id) {
+    if !infer_core::is_profile_model_downloaded(&state.wd_cache_dir, &body.model_id, &spec) {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"error": "model not downloaded"})),
@@ -1657,30 +1681,49 @@ async fn infer_wd(
             .into_response();
     }
 
+    // The cached engine holds the tag vocabulary, thresholds and preprocess
+    // recipe, so the model id alone does not identify it: two requests for the
+    // same directory with different profiles must not share one engine.
+    let cache_key = match serde_json::to_string(&spec) {
+        Ok(fingerprint) => format!("{}\x00{}", body.model_id, fingerprint),
+        Err(error) => {
+            tracing::error!("yu-infer wd profile fingerprint failed: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal error"})),
+            )
+                .into_response();
+        }
+    };
+
     let wd_infer = state.wd_infer.clone();
-    let model_id = body.model_id.clone();
-    let general_thr = body.general_thr;
-    let character_thr = body.character_thr;
 
     let result = tokio::task::spawn_blocking(move || {
         let engine = {
             let mut engines = wd_infer.write().unwrap();
-            engines
-                .entry(model_id)
-                .or_insert_with(|| {
-                    Arc::new(
-                        infer_core::WdInferEngine::new(&model_dir)
-                            .expect("WdInferEngine init failed after is_model_downloaded check"),
-                    )
-                })
-                .clone()
-        };
-        engine.run(&real_path, general_thr, character_thr)
+            match engines.entry(cache_key) {
+                std::collections::hash_map::Entry::Occupied(slot) => Ok(slot.get().clone()),
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    // Constructing the engine reads the vocabulary off disk and
+                    // can fail on a corrupt or mismatched file. Propagate that
+                    // instead of panicking inside the blocking pool.
+                    infer_core::WdInferEngine::new(&model_dir, spec).map(|engine| {
+                        let engine = Arc::new(engine);
+                        slot.insert(engine.clone());
+                        engine
+                    })
+                }
+            }
+        }?;
+        engine.run(&real_path)
     })
     .await;
 
     match result {
-        Ok(Ok(tag_result)) => Json(json!({"ok": true, "data": tag_result})).into_response(),
+        Ok(Ok(tag_result)) => {
+            Json(json!({"ok": true, "data": tag_result, "profile_applied": profile_applied}))
+                .into_response()
+        }
         Ok(Err(e)) => {
             tracing::error!("yu-infer wd inference error: {e}");
             (
