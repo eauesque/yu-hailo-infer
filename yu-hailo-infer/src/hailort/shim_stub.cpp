@@ -100,6 +100,7 @@ void yu_hailort_s2t_release(YuHailortSpeech2Text *ctx)
     ++s2t_release_count;
 }
 int yu_hailort_s2t_generate_text(YuHailortSpeech2Text *, const float *, size_t, int, const char *, float, uint32_t, char **) { return HAILO_STUB_ERR; }
+int yu_hailort_s2t_generate_segments(YuHailortSpeech2Text *, const float *, size_t, int, const char *, float, uint32_t, char **) { return HAILO_STUB_ERR; }
 int yu_hailort_s2t_tokenize(YuHailortSpeech2Text *, const char *, int *, size_t *) { return HAILO_STUB_ERR; }
 
 int yu_hailort_llm_create(const char *, const char *, bool, YuHailortLlm **out)

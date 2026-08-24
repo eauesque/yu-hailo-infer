@@ -345,6 +345,71 @@ int yu_hailort_s2t_generate_text(
     return (nullptr == *out_text) ? HAILO_OUT_OF_HOST_MEMORY : HAILO_SUCCESS;
 }
 
+int yu_hailort_s2t_generate_segments(
+    YuHailortSpeech2Text *ctx,
+    const float *audio,
+    size_t audio_count,
+    int task,
+    const char *language,
+    float repetition_penalty,
+    uint32_t timeout_ms,
+    char **out_json)
+{
+    if ((nullptr == ctx) || (nullptr == audio) || (nullptr == out_json)) {
+        return HAILO_INVALID_ARGUMENT;
+    }
+    *out_json = nullptr;
+
+    auto params = ctx->speech2text->create_generator_params();
+    if (!params) {
+        return params.status();
+    }
+    auto generator_params = params.release();
+    auto status = generator_params.set_task(static_cast<hailort::genai::Speech2TextTask>(task));
+    if (HAILO_SUCCESS != status) {
+        return status;
+    }
+    if ((nullptr != language) && ('\0' != language[0])) {
+        status = generator_params.set_language(std::string_view(language));
+        if (HAILO_SUCCESS != status) {
+            return status;
+        }
+    }
+    status = generator_params.set_repetition_penalty(repetition_penalty);
+    if (HAILO_SUCCESS != status) {
+        return status;
+    }
+
+    auto audio_view = hailort::MemoryView(
+        const_cast<float *>(audio),
+        audio_count * sizeof(float));
+    auto segments = ctx->speech2text->generate_all_segments(
+        audio_view,
+        generator_params,
+        std::chrono::milliseconds(timeout_ms));
+    if (!segments) {
+        return segments.status();
+    }
+
+    std::string json = "[";
+    bool first = true;
+    for (const auto &segment : segments.value()) {
+        if (!first) {
+            json += ",";
+        }
+        first = false;
+        char bounds[64];
+        std::snprintf(bounds, sizeof(bounds), "{\"start_sec\":%.6f,\"end_sec\":%.6f,",
+            static_cast<double>(segment.start_sec), static_cast<double>(segment.end_sec));
+        json += bounds;
+        json += "\"text\":\"" + escape_json_string(segment.text) + "\"}";
+    }
+    json += "]";
+
+    *out_json = copy_string_to_c(json);
+    return (nullptr == *out_json) ? HAILO_OUT_OF_HOST_MEMORY : HAILO_SUCCESS;
+}
+
 int yu_hailort_s2t_tokenize(
     YuHailortSpeech2Text *ctx,
     const char *text,

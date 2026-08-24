@@ -67,6 +67,19 @@ int yu_hailort_s2t_generate_text(
     float repetition_penalty,
     uint32_t timeout_ms,
     char **out_text);
+// Same generation as yu_hailort_s2t_generate_text, but returns the SDK's
+// per-segment breakdown (start/end timestamps + text) as a JSON array
+// string: [{"start_sec":F,"end_sec":F,"text":"..."},...]. Caller frees
+// *out_json with yu_hailort_string_free, same as out_text above.
+int yu_hailort_s2t_generate_segments(
+    YuHailortSpeech2Text *ctx,
+    const float *audio,
+    size_t audio_count,
+    int task,
+    const char *language,
+    float repetition_penalty,
+    uint32_t timeout_ms,
+    char **out_json);
 int yu_hailort_s2t_tokenize(
     YuHailortSpeech2Text *ctx,
     const char *text,

@@ -1,6 +1,8 @@
 use std::ffi::{c_char, c_float, c_int, CString};
 use std::ptr::NonNull;
 
+use serde::Deserialize;
+
 use super::{check_status, ffi, HailoRtError, HailoRtResult};
 
 pub(super) enum YuHailortSpeech2Text {}
@@ -9,6 +11,15 @@ pub(super) enum YuHailortSpeech2Text {}
 pub(crate) enum Speech2TextTask {
     Transcribe = 0,
     Translate = 1,
+}
+
+/// One transcribed segment, mirroring the SDK's `Speech2Text::SegmentInfo`
+/// (`generate_all_segments()`).
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct Segment {
+    pub(crate) start_sec: f32,
+    pub(crate) end_sec: f32,
+    pub(crate) text: String,
 }
 
 extern "C" {
@@ -26,6 +37,16 @@ extern "C" {
         repetition_penalty: c_float,
         timeout_ms: u32,
         out_text: *mut *mut c_char,
+    ) -> ffi::HailoStatus;
+    fn yu_hailort_s2t_generate_segments(
+        ctx: *mut YuHailortSpeech2Text,
+        audio: *const c_float,
+        audio_count: usize,
+        task: c_int,
+        language: *const c_char,
+        repetition_penalty: c_float,
+        timeout_ms: u32,
+        out_json: *mut *mut c_char,
     ) -> ffi::HailoStatus;
     fn yu_hailort_s2t_tokenize(
         ctx: *mut YuHailortSpeech2Text,
@@ -77,6 +98,40 @@ impl Speech2Text {
         };
         check_status("s2t_generate_text", status)?;
         take_c_string(out)
+    }
+
+    /// Same generation as [`Speech2Text::generate_text`], but returns the
+    /// SDK's per-segment breakdown (start/end timestamps + text) instead of
+    /// a single flattened string. Python's `s2t_inference.transcribe_segments()`
+    /// returns this shape; the flat-text path silently drops it.
+    pub(crate) fn generate_segments(
+        &mut self,
+        audio: &[f32],
+        task: Speech2TextTask,
+        language: Option<&str>,
+        repetition_penalty: f32,
+        timeout_ms: u32,
+    ) -> HailoRtResult<Vec<Segment>> {
+        let language = CString::new(language.unwrap_or(""))?;
+        let mut out = std::ptr::null_mut();
+        // SAFETY: audio slice and language C string live until call returns; out pointer is valid.
+        let status = unsafe {
+            yu_hailort_s2t_generate_segments(
+                self.raw.as_ptr(),
+                audio.as_ptr(),
+                audio.len(),
+                task as c_int,
+                language.as_ptr(),
+                repetition_penalty,
+                timeout_ms,
+                &mut out,
+            )
+        };
+        check_status("s2t_generate_segments", status)?;
+        let json = take_c_string(out)?;
+        serde_json::from_str(&json).map_err(|_| {
+            HailoRtError::InvalidMetadata("shim returned malformed segments JSON")
+        })
     }
 
     pub(crate) fn tokenize(&mut self, text: &str) -> HailoRtResult<Vec<i32>> {

@@ -246,7 +246,7 @@ async fn speech2text_transcribe(
         let hef_path_str = hef_path_str.clone();
         move |ctx| {
             ctx.speech2text(&hef_path_str).and_then(|mut s2t| {
-                s2t.generate_text(
+                s2t.generate_segments(
                     &audio,
                     task,
                     language.as_deref(),
@@ -258,7 +258,34 @@ async fn speech2text_transcribe(
     })
     .await;
     match result {
-        Ok(text) => api_ok(json!({"hef_path": hef_path_str, "text": text, "task": task_name})),
+        Ok(segments) => {
+            // The flat `text` field is kept for callers that only want the
+            // transcript (and for backward compat with the pre-segment
+            // response shape) -- it is exactly what generate_all_text()
+            // would have produced, joined the same way Whisper's own
+            // segment-to-text concatenation does.
+            let text = segments
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let segments_json: Vec<_> = segments
+                .into_iter()
+                .map(|segment| {
+                    json!({
+                        "text": segment.text,
+                        "start": segment.start_sec,
+                        "end": segment.end_sec,
+                    })
+                })
+                .collect();
+            api_ok(json!({
+                "hef_path": hef_path_str,
+                "text": text,
+                "segments": segments_json,
+                "task": task_name,
+            }))
+        }
         Err(error) => hailort_api_error(error, "hailort_s2t_generate_failed"),
     }
 }
@@ -561,5 +588,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+
+        // Lock in the response contract added for segment support: `segments`
+        // must be present and array-shaped even for silence (which may
+        // legitimately transcribe to zero segments) -- this is what would
+        // regress silently if generate_all_segments()'s JSON marshaling
+        // broke, since the flat `text` field alone wouldn't catch it.
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body).expect("response body is valid JSON");
+        let data = &parsed["data"];
+        assert!(
+            data["segments"].is_array(),
+            "expected data.segments to be an array, got: {parsed}"
+        );
+        assert!(
+            data["text"].is_string(),
+            "expected data.text to be a string, got: {parsed}"
+        );
     }
 }
