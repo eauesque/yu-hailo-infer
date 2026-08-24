@@ -193,6 +193,11 @@ pub struct InferWdRequest {
     /// adapter family and belongs with the registry, not here.
     #[serde(default)]
     pub profile: Option<infer_core::WdProfileSpec>,
+    /// Variant subdirectory under the model's cache directory, for repos that
+    /// ship several builds (the Python side calls this `hf_subdir`). Validated
+    /// as a plain relative path before being joined.
+    #[serde(default)]
+    pub model_subdir: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1672,8 +1677,18 @@ async fn infer_wd(
             .into_response();
     }
 
-    let model_dir = state.wd_cache_dir.join(&body.model_id);
-    if !infer_core::is_profile_model_downloaded(&state.wd_cache_dir, &body.model_id, &spec) {
+    let Some(model_dir) = infer_core::resolve_model_dir(
+        &state.wd_cache_dir,
+        &body.model_id,
+        body.model_subdir.as_deref(),
+    ) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid model_subdir"})),
+        )
+            .into_response();
+    };
+    if !infer_core::is_profile_model_ready(&model_dir, &spec) {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"error": "model not downloaded"})),
@@ -1685,7 +1700,7 @@ async fn infer_wd(
     // recipe, so the model id alone does not identify it: two requests for the
     // same directory with different profiles must not share one engine.
     let cache_key = match serde_json::to_string(&spec) {
-        Ok(fingerprint) => format!("{}\x00{}", body.model_id, fingerprint),
+        Ok(fingerprint) => format!("{}\x00{}", model_dir.display(), fingerprint),
         Err(error) => {
             tracing::error!("yu-infer wd profile fingerprint failed: {error}");
             return (
