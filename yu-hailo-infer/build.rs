@@ -19,9 +19,11 @@ fn main() {
         .as_deref()
         .map(|d| std::path::Path::new(d).join("hailo/hailort.hpp").exists())
         .unwrap_or_else(|| {
-            ["/usr/local", "/usr"]
-                .iter()
-                .any(|prefix| std::path::Path::new(prefix).join("include/hailo/hailort.hpp").exists())
+            ["/usr/local", "/usr"].iter().any(|prefix| {
+                std::path::Path::new(prefix)
+                    .join("include/hailo/hailort.hpp")
+                    .exists()
+            })
         });
 
     if header_exists {
@@ -43,10 +45,11 @@ fn main() {
                     .unwrap_or_else(|| dir.clone())
             });
             println!("cargo:rustc-link-search=native={lib_dir}");
-        } else if let Some(prefix) = ["/usr/local", "/usr"]
-            .iter()
-            .find(|prefix| std::path::Path::new(prefix).join("include/hailo/hailort.hpp").exists())
-        {
+        } else if let Some(prefix) = ["/usr/local", "/usr"].iter().find(|prefix| {
+            std::path::Path::new(prefix)
+                .join("include/hailo/hailort.hpp")
+                .exists()
+        }) {
             build.include(format!("{prefix}/include"));
             println!("cargo:rustc-link-search=native={prefix}/lib");
         }

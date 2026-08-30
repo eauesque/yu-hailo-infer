@@ -42,7 +42,10 @@ pub async fn run() {
     let state = router::AppState {
         started_at: std::time::Instant::now(),
         instance_id: contract.instance_id,
-        scan_roots: Arc::new(RwLock::new(contract.scan_roots)),
+        scan_roots: Arc::new(RwLock::new(router::ScanRoots {
+            roots: contract.scan_roots,
+            generation: 0,
+        })),
         auth_token: contract.auth_token,
         wd_cache_dir: cli.wd_cache_dir,
         wd_infer: Arc::new(RwLock::new(HashMap::new())),

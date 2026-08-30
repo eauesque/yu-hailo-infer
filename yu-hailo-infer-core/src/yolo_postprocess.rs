@@ -90,8 +90,10 @@ pub fn validate_yolo_outputs(outputs: &[YoloOutputBuffer]) -> Result<(), String>
 
 pub fn dequantize(data: &[u8], scale: f32, zero_point: f32, is_float32: bool) -> Vec<f32> {
     if is_float32 {
-        data.chunks_exact(4)
-            .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        data.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&bytes| f32::from_le_bytes(bytes))
             .collect()
     } else {
         data.iter()
@@ -173,7 +175,7 @@ pub fn parse_nms_output(buf: &YoloOutputBuffer) -> (Vec<[f64; 4]>, Vec<f64>, Vec
     let mut scores = Vec::new();
     let mut class_ids = Vec::new();
 
-    for row in values.chunks_exact(6) {
+    for row in values.as_chunks::<6>().0 {
         let score = row[4] as f64;
         if score > 0.0 {
             boxes.push([row[1] as f64, row[0] as f64, row[3] as f64, row[2] as f64]);

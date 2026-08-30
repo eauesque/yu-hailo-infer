@@ -129,9 +129,8 @@ impl Speech2Text {
         };
         check_status("s2t_generate_segments", status)?;
         let json = take_c_string(out)?;
-        serde_json::from_str(&json).map_err(|_| {
-            HailoRtError::InvalidMetadata("shim returned malformed segments JSON")
-        })
+        serde_json::from_str(&json)
+            .map_err(|_| HailoRtError::InvalidMetadata("shim returned malformed segments JSON"))
     }
 
     pub(crate) fn tokenize(&mut self, text: &str) -> HailoRtResult<Vec<i32>> {

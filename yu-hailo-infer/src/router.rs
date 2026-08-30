@@ -89,11 +89,23 @@ fn media_preprocessing_permits(reservation_bytes: u64) -> u32 {
         .expect("media preprocessing reservation exceeds semaphore capacity type")
 }
 
+/// The scan roots yu-server last told us about, paired with the `generation`
+/// that delivered them. Both live under one lock on purpose: the
+/// compare-and-apply in `scan_roots_changed` must not interleave with another
+/// request's, and a separate counter would let two calls both pass the
+/// staleness check and then land in the wrong order.
+pub struct ScanRoots {
+    pub roots: Vec<PathBuf>,
+    /// Highest generation applied so far. yu-server's counter starts at 1, so
+    /// 0 means nothing but the startup contract has been applied yet.
+    pub generation: u64,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub started_at: std::time::Instant,
     pub instance_id: String,
-    pub scan_roots: Arc<RwLock<Vec<PathBuf>>>,
+    pub scan_roots: Arc<RwLock<ScanRoots>>,
     pub auth_token: String,
     pub wd_cache_dir: PathBuf,
     pub wd_infer: Arc<RwLock<HashMap<String, Arc<infer_core::WdInferEngine>>>>,
@@ -151,6 +163,16 @@ async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
 #[derive(Deserialize)]
 pub struct ScanRootsChangedRequest {
     pub scan_roots: Vec<String>,
+    /// Monotonic counter yu-server assigns in config-write order. Its own send
+    /// lock only orders the sends it starts; a send it gave up on (5s timeout)
+    /// can still reach us after a newer one, so anything not strictly newer
+    /// than what we already applied is dropped here.
+    ///
+    /// Absent means a yu-server predating the field: apply unconditionally,
+    /// which is exactly what we did before, and leave the stored generation
+    /// alone so a mixed deployment cannot wedge us.
+    #[serde(default)]
+    pub generation: Option<u64>,
 }
 
 async fn scan_roots_changed(
@@ -166,13 +188,23 @@ async fn scan_roots_changed(
             .into_response();
     }
 
-    let roots = body
+    // Canonicalize before taking the lock -- it hits the filesystem.
+    let roots: Vec<PathBuf> = body
         .scan_roots
         .into_iter()
         .filter_map(|path| std::fs::canonicalize(path).ok())
         .collect();
-    *state.scan_roots.write().unwrap() = roots;
-    Json(json!({"ok": true})).into_response()
+
+    let mut scan_roots = state.scan_roots.write().unwrap();
+    if let Some(generation) = body.generation {
+        if generation <= scan_roots.generation {
+            return Json(json!({"ok": true, "applied": false, "stale": true})).into_response();
+        }
+        scan_roots.generation = generation;
+    }
+    scan_roots.roots = roots;
+    drop(scan_roots);
+    Json(json!({"ok": true, "applied": true})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -250,7 +282,11 @@ fn check_auth(state: &AppState, headers: &HeaderMap) -> bool {
 
 fn check_scan_roots(state: &AppState, real_path: &std::path::Path) -> bool {
     let scan_roots = state.scan_roots.read().unwrap();
-    !scan_roots.is_empty() && scan_roots.iter().any(|root| real_path.starts_with(root))
+    !scan_roots.roots.is_empty()
+        && scan_roots
+            .roots
+            .iter()
+            .any(|root| real_path.starts_with(root))
 }
 
 fn check_model_id(model_id: &str) -> bool {
@@ -1771,7 +1807,10 @@ mod tests {
         AppState {
             started_at: std::time::Instant::now(),
             instance_id: "test-instance".to_string(),
-            scan_roots: Arc::new(RwLock::new(scan_roots)),
+            scan_roots: Arc::new(RwLock::new(ScanRoots {
+                roots: scan_roots,
+                generation: 0,
+            })),
             auth_token: "test-token".to_string(),
             wd_cache_dir: std::env::temp_dir().join("yu-infer-test-cache"),
             wd_infer: Arc::new(RwLock::new(HashMap::new())),
@@ -2081,6 +2120,100 @@ mod tests {
         let decoded = decode_base64_image(&base64_frame, &mut budget).expect("decode small frame");
         assert_eq!(decoded.width(), 64);
         assert_eq!(decoded.height(), 64);
+    }
+
+    async fn scan_roots_changed_request(
+        app: axum::Router,
+        roots: &[&std::path::Path],
+        generation: Option<u64>,
+    ) -> StatusCode {
+        let mut payload = json!({
+            "scan_roots": roots.iter().map(|p| p.to_str().unwrap()).collect::<Vec<_>>(),
+        });
+        if let Some(generation) = generation {
+            payload["generation"] = json!(generation);
+        }
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/_internal/scan-roots-changed")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-token")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+    }
+
+    #[tokio::test]
+    async fn scan_roots_changed_drops_a_generation_it_already_passed() {
+        let base = std::env::temp_dir().join("yu-infer-scan-roots-generation-test");
+        let newer = base.join("newer");
+        let older = base.join("older");
+        std::fs::create_dir_all(&newer).unwrap();
+        std::fs::create_dir_all(&older).unwrap();
+        let canonical_newer = std::fs::canonicalize(&newer).unwrap();
+
+        let state = test_state(vec![]);
+
+        // Generation 2 lands first; the send that carried generation 1 timed
+        // out on yu-server's side and only reaches us afterwards.
+        let status =
+            scan_roots_changed_request(build_router(state.clone()), &[&newer], Some(2)).await;
+        assert_eq!(status, StatusCode::OK);
+        let status =
+            scan_roots_changed_request(build_router(state.clone()), &[&older], Some(1)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            state.scan_roots.read().unwrap().roots,
+            vec![canonical_newer.clone()],
+            "a stale generation must not clobber the newer roots"
+        );
+
+        // An equal generation is a replay, not news, so it is dropped too.
+        let status =
+            scan_roots_changed_request(build_router(state.clone()), &[&older], Some(2)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            state.scan_roots.read().unwrap().roots,
+            vec![canonical_newer]
+        );
+
+        // A strictly newer generation still applies.
+        let status =
+            scan_roots_changed_request(build_router(state.clone()), &[&older], Some(3)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            state.scan_roots.read().unwrap().roots,
+            vec![std::fs::canonicalize(&older).unwrap()]
+        );
+        assert_eq!(state.scan_roots.read().unwrap().generation, 3);
+    }
+
+    #[tokio::test]
+    async fn scan_roots_changed_applies_a_request_without_a_generation() {
+        // A yu-server predating the field must keep working, and must not
+        // move the stored generation.
+        let base = std::env::temp_dir().join("yu-infer-scan-roots-legacy-test");
+        let first = base.join("first");
+        let later = base.join("later");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&later).unwrap();
+        let state = test_state(vec![]);
+
+        let status =
+            scan_roots_changed_request(build_router(state.clone()), &[&first], Some(7)).await;
+        assert_eq!(status, StatusCode::OK);
+        let status = scan_roots_changed_request(build_router(state.clone()), &[&later], None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            state.scan_roots.read().unwrap().roots,
+            vec![std::fs::canonicalize(&later).unwrap()],
+            "a request without a generation must still apply"
+        );
+        assert_eq!(state.scan_roots.read().unwrap().generation, 7);
     }
 
     #[tokio::test]

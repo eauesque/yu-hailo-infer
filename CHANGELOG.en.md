@@ -7,6 +7,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.3.1] - 2026-08-30
+
+### Fixed
+
+- **A stale `/_internal/scan-roots-changed` notification could overwrite newer
+  scan roots.** yu-server assigns a monotonic `generation` in config-write order,
+  but the receiver never read it and overwrote its roots on every call. yu-server's
+  own send lock orders only the sends it starts; one it gave up on (5s timeout)
+  can still land afterwards and clobber a newer one. The handler now remembers the
+  highest generation it applied and drops anything not strictly newer, answering
+  `{"ok":true,"applied":false,"stale":true}`. The generation lives under the same
+  `RwLock` as the roots so the compare-and-apply cannot interleave with another
+  request. A request carrying no `generation` (a yu-server predating the field) is
+  still applied unconditionally and leaves the stored generation alone.
+
+---
+
 ## [0.3.0] - 2026-08-16
 
 Verified on Hailo-10H hardware. Wires native tool-call support (HailoRT genai

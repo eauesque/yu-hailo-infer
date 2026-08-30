@@ -7,6 +7,21 @@
 
 ---
 
+## [0.3.1] - 2026-08-30
+
+### Fixed
+
+- **`/_internal/scan-roots-changed` が古い世代の通知で新しい scan roots を上書きし得た問題
+  を修正。** yu-server は書込順に単調増加する `generation` を払っているが、受信側はこれを
+  読まず毎回無条件に上書きしていた。yu-server 側の送信ロックは自ら開始した送信しか順序化
+  できず、5 秒の timeout で諦めた送信は後から到着して新しい状態を潰し得る。受信側で
+  `generation` を記憶し、既に適用した値以下の要求を落とすようにした（応答は
+  `{"ok":true,"applied":false,"stale":true}`）。`generation` は roots と同一の
+  `RwLock` 下に置き、比較と適用が他要求と交錯しないようにしてある。`generation` を持たない
+  要求（本フィールド以前の yu-server）は従来どおり無条件に適用し、記憶した世代も動かさない。
+
+---
+
 ## [0.3.0] - 2026-08-16
 
 Hailo-10H 実機で検証済み。`/v1/infer/llm/generate/stream` にネイティブ tool 呼出し対応

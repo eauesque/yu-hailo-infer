@@ -304,12 +304,16 @@ mod tests {
 
     use super::*;
     use crate::router::build_router;
+    use crate::router::ScanRoots;
 
     fn test_state(scan_roots: Vec<PathBuf>) -> AppState {
         AppState {
             started_at: std::time::Instant::now(),
             instance_id: "test-instance".to_string(),
-            scan_roots: Arc::new(RwLock::new(scan_roots)),
+            scan_roots: Arc::new(RwLock::new(ScanRoots {
+                roots: scan_roots,
+                generation: 0,
+            })),
             auth_token: "test-token".to_string(),
             wd_cache_dir: std::env::temp_dir().join("yu-infer-test-cache"),
             wd_infer: Arc::new(RwLock::new(HashMap::new())),
