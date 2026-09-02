@@ -6,6 +6,7 @@ categories  = ["computer-vision", "web-programming::http-server"]
 # No `readme`: the READMEs live at the workspace root, outside this package.
 version.workspace    = true
 edition.workspace    = true
+rust-version.workspace = true
 license.workspace    = true
 repository.workspace = true
 authors.workspace    = true

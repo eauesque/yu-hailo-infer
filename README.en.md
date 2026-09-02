@@ -27,7 +27,7 @@ This is the service itself, not a `-sys` binding crate. It targets the Hailo-10H
 
 ## Dependencies
 
-- Rust: built and tested with 1.96.0. No MSRV is declared — older toolchains have not been verified, so the crates deliberately omit `rust-version`.
+- Rust: **1.88** or newer. `[workspace.package]` declares `rust-version = "1.88"` and every crate inherits it. The number was measured, not assumed (2026-09-03): the workspace builds on 1.88.0 and cargo refuses 1.85.0. The floor comes from dependencies rather than from this code — cargo reports that `ort`/`ort-sys` 2.0.0-rc.12 require `rustc 1.88` — so it moves when they do. Re-measure with `cargo build --workspace` under an older toolchain before lowering it.
 - HailoRT SDK (version to be documented) — requires `hailort` shared library and headers
 - `ort` (ONNX Runtime bindings) — used for CLIP text encoder and WD-Tagger inference
 - `tokenizers` (Apache-2.0) — used for BPE tokenization of CLIP/LLM

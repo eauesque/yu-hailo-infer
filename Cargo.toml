@@ -5,6 +5,13 @@ resolver = "2"
 [workspace.package]
 version    = "0.3.1"
 edition    = "2021"
+# Measured 2026-09-03, not guessed: the workspace builds on 1.88.0 and cargo
+# refuses 1.85.0. The floor comes from dependencies rather than from this
+# code -- `ort`/`ort-sys` 2.0.0-rc.12 declare `rust-version = 1.88` -- so it
+# moves when they do. Re-measure with `cargo build --workspace` under an older
+# toolchain before lowering this; a number nobody verified is worse than none,
+# because it reads as a promise.
+rust-version = "1.88"
 license    = "MIT"
 repository = "https://github.com/eauesque/yu-hailo-infer"
 authors    = ["eauesque"]

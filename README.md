@@ -27,7 +27,7 @@ Hailo-10H向けRustネイティブ推論マイクロサービス。HTTP経由で
 
 ## 依存
 
-- Rust: 1.96.0 でビルド・テストを確認済み。最低対応バージョン(MSRV)は未確定であり、旧toolchainでの検証を行っていないため `rust-version` は宣言していない
+- Rust: **1.88** 以上。`[workspace.package]` に `rust-version = "1.88"` を宣言しており、各クレートが継承する。1.88.0 でのビルド成功と 1.85.0 での失敗を実測して決めた値である(2026-09-03)。下限を決めているのは本リポジトリのコードではなく依存で、cargo は `ort`/`ort-sys` 2.0.0-rc.12 が `rustc 1.88` を要求すると報告する。依存を上下させればこの値も動くため、下げる際は必ず旧 toolchain で `cargo build --workspace` を実測すること
 - HailoRT SDK(バージョン要記載) — `hailort`共有ライブラリ・ヘッダが必要
 - `ort`(ONNX Runtime バインディング) — CLIPテキストエンコーダ・WD-Tagger推論に使用
 - `tokenizers`(Apache-2.0) — CLIP/LLMのBPEトークナイズに使用

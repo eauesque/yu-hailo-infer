@@ -7,6 +7,27 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **Measured the MSRV as `1.88` and declared `rust-version` in
+  `[workspace.package]`**, with every crate inheriting it via
+  `rust-version.workspace = true`. The READMEs previously said only "built and
+  tested with 1.96.0, MSRV undetermined" and the crates shipped no
+  `rust-version` at all, so a consumer could not tell whether their toolchain
+  would work without trying it.
+  - The number is measured, not assumed: the workspace builds on 1.88.0 and
+    cargo refuses 1.85.0.
+  - **The floor comes from dependencies, not from this code**: cargo reports
+    that `ort`/`ort-sys` 2.0.0-rc.12 require `rustc 1.88`. It moves when they
+    do, so re-measure before lowering it.
+  - Verified the declaration is live by injection: raising it to `1.99`
+    temporarily makes cargo refuse and name *our* packages
+    (`yu-hailo-auth@0.3.1 requires rustc 1.99`) rather than a dependency.
+    Without that check, a failure of key inheritance would have left the MSRV
+    a promise with nothing enforcing it.
+
 ## [0.3.1] - 2026-08-30
 
 ### Fixed
