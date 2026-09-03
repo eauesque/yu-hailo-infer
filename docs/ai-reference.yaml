@@ -78,7 +78,7 @@ features:
   - name: healthz
     endpoints: ["GET /healthz"]
     auth_required: false
-    purpose: "Liveness probe. Returns {ok: true, uptime_seconds, instance_id}."
+    purpose: "Liveness probe. Returns {ok: true, uptime_secs, instance_id, hailo_stub}. hailo_stub is true when the binary was built without HailoRT headers (links the stub shim), letting callers (e.g. yu-server) distinguish a live device from a sidecar-only deployment."
     related_code: "yu-hailo-infer/src/router.rs::healthz"
 
   - name: scan_roots_hot_reload

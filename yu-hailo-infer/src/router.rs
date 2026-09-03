@@ -157,6 +157,10 @@ async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
         "ok": true,
         "uptime_secs": state.started_at.elapsed().as_secs(),
         "instance_id": state.instance_id,
+        // HailoRT headers were absent at build time, so this binary links the
+        // stub shim instead of real hardware. Callers (e.g. yu-server) use
+        // this to distinguish a live device from a sidecar-only deployment.
+        "hailo_stub": cfg!(hailo_stub),
     }))
 }
 
@@ -2319,6 +2323,7 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["instance_id"], "test-instance");
+        assert_eq!(body["hailo_stub"], cfg!(hailo_stub));
     }
 
     #[tokio::test]
