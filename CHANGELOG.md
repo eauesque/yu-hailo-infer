@@ -7,7 +7,21 @@
 
 ---
 
-## [Unreleased]
+## [0.4.0] - 2026-09-03
+
+### Added
+
+- **`GET /healthz` が `hailo_stub` フィールドを返すようになった。** ビルド時に
+  HailoRT ヘッダが見つからずスタブシムをリンクした場合は `true`、実機ビルドでは
+  `false`。呼び出し側(yu-server 等)がサイドカー生存とHailo実機の稼働を区別できる
+  ようにするための恒久修正(yu_ai_manager TODO.md v4.689.47 記載分)。
+- **`scripts/hailo_infer_smoke.py` を新設した。** yu-server 経由ではなく
+  `yu-hailo-infer` 単体プロセスに対して `/v1/infer/*` を直接叩く実機スモーク
+  テスト。DB・JobManager・SSE 等の結合部は検証しない(それは呼び出し側の
+  `yu_ai_manager/scripts/hailo_realhw_smoke.py` の役目)。Hailo-10H 実機 +
+  `~/hailo_models/` 配下の HEF 一式で全15項目 PASS を確認済み(CLIP画像
+  embedding・WD-Tagger・YOLO検出・LLM生成・VLMストリーミング生成・音声文字起こし)。
+  CLIPテキスト(ONNXモデル)・WD-Taggerはモデル未配置の場合SKIPとして報告する。
 
 ### Changed
 

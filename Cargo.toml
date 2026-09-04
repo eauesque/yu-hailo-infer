@@ -3,7 +3,7 @@ members = ["yu-hailo-auth", "yu-hailo-infer-core", "yu-hailo-infer"]
 resolver = "2"
 
 [workspace.package]
-version    = "0.3.1"
+version    = "0.4.0"
 edition    = "2021"
 # Measured 2026-09-03, not guessed: the workspace builds on 1.88.0 and cargo
 # refuses 1.85.0. The floor comes from dependencies rather than from this

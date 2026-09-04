@@ -27,6 +27,8 @@ MODE="${1:-sync}"
 PRIVATE_ONLY=(
   ".git"          # never copied — the mirror keeps its own history
   ".claude"       # agent configuration, not part of the crate
+  ".serena"       # agent configuration (Serena), not part of the crate
+  ".mcp.json"     # MCP server registration naming machine-local binaries
   ".yu"           # ai-coreutils workspace config
   "CLAUDE.md"     # instructions to coding agents
   "TODO.md"       # internal work tracking

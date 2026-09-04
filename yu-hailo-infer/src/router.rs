@@ -166,6 +166,10 @@ async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
         "uptime_secs": state.started_at.elapsed().as_secs(),
         "instance_id": state.instance_id,
         "clip_image_onnx": infer_core::is_clip_image_model_downloaded(&state.clip_model_dir),
+        // HailoRT headers were absent at build time, so this binary links the
+        // stub shim instead of real hardware. Callers (e.g. yu-server) use
+        // this to distinguish a live device from a sidecar-only deployment.
+        "hailo_stub": cfg!(hailo_stub),
     }))
 }
 
@@ -2455,6 +2459,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["instance_id"], "test-instance");
         assert_eq!(body["clip_image_onnx"], false);
+        assert_eq!(body["hailo_stub"], cfg!(hailo_stub));
 
         std::fs::write(model_dir.join("vision_model.onnx"), b"model").unwrap();
         let response = build_router(state)
