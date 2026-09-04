@@ -108,8 +108,10 @@ pub struct AppState {
     pub scan_roots: Arc<RwLock<ScanRoots>>,
     pub auth_token: String,
     pub wd_cache_dir: PathBuf,
+    pub clip_model_dir: PathBuf,
     pub wd_infer: Arc<RwLock<HashMap<String, Arc<infer_core::WdInferEngine>>>>,
     pub clip_text: Arc<RwLock<HashMap<String, Arc<infer_core::ClipTextEncoder>>>>,
+    pub clip_image: Arc<RwLock<HashMap<String, Arc<infer_core::ClipImageEncoder>>>>,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -128,6 +130,12 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/v1/infer/clip-image",
             post(clip_image).layer(axum::extract::DefaultBodyLimit::max(
+                MAX_FRAME_BASE64_BYTES + 4096,
+            )),
+        )
+        .route(
+            "/v1/infer/clip-image-onnx",
+            post(clip_image_onnx).layer(axum::extract::DefaultBodyLimit::max(
                 MAX_FRAME_BASE64_BYTES + 4096,
             )),
         )
@@ -157,10 +165,7 @@ async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
         "ok": true,
         "uptime_secs": state.started_at.elapsed().as_secs(),
         "instance_id": state.instance_id,
-        // HailoRT headers were absent at build time, so this binary links the
-        // stub shim instead of real hardware. Callers (e.g. yu-server) use
-        // this to distinguish a live device from a sidecar-only deployment.
-        "hailo_stub": cfg!(hailo_stub),
+        "clip_image_onnx": infer_core::is_clip_image_model_downloaded(&state.clip_model_dir),
     }))
 }
 
@@ -254,6 +259,12 @@ pub struct YoloDetectRequest {
 #[derive(Debug, Deserialize)]
 pub struct ClipImageRequest {
     hef_path: Option<String>,
+    image_base64: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClipImageOnnxRequest {
+    model_dir: Option<String>,
     image_base64: String,
 }
 
@@ -741,7 +752,7 @@ fn clip_image_hef_path(path: Option<&str>) -> PathBuf {
         .unwrap_or_else(|| env_or_default_path("HAILO_CLIP_HEF", "clip_vit_b_16_image_encoder.hef"))
 }
 
-fn clip_text_model_dir(path: Option<&str>) -> PathBuf {
+pub(crate) fn clip_text_model_dir(path: Option<&str>) -> PathBuf {
     path.map(PathBuf::from).unwrap_or_else(|| {
         std::env::var_os("HAILO_CLIP_TEXT_MODEL_DIR")
             .map(PathBuf::from)
@@ -1159,7 +1170,10 @@ async fn clip_text(
         return response;
     }
 
-    let model_dir = clip_text_model_dir(body.model_dir.as_deref());
+    let model_dir = body
+        .model_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state.clip_model_dir.clone());
     let cache_key = model_dir.to_string_lossy().to_string();
     let encoders = state.clip_text.clone();
     let text = body.text;
@@ -1199,6 +1213,115 @@ async fn clip_text(
             StatusCode::INTERNAL_SERVER_ERROR,
             "clip_text_task_failed",
             format!("CLIP text task failed: {error}"),
+        ),
+    }
+}
+
+async fn clip_image_onnx(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ClipImageOnnxRequest>,
+) -> Response {
+    if let Some(response) = auth_error(&state, &headers) {
+        return response;
+    }
+    let ClipImageOnnxRequest {
+        model_dir: requested_model_dir,
+        image_base64,
+    } = body;
+    if image_base64.len() > MAX_FRAME_BASE64_BYTES {
+        return api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "clip_image_too_large",
+            format!("image_base64 exceeds {MAX_FRAME_BASE64_BYTES} bytes"),
+        );
+    }
+
+    let input =
+        match run_media_preprocessing(MAX_IMAGE_PREPROCESSING_RESERVATION_BYTES, move || {
+            let mut decode_budget = MAX_TOTAL_DECODED_IMAGE_BYTES;
+            let image = decode_base64_image(&image_base64, &mut decode_budget)?;
+            Ok(resize_frame(&image, 224, 224))
+        })
+        .await
+        {
+            Ok(input) => input,
+            Err(MediaPreprocessError::Busy) => {
+                return api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "media_preprocessing_busy",
+                    "media preprocessing capacity is temporarily exhausted".to_string(),
+                )
+            }
+            Err(MediaPreprocessError::Task(error)) => {
+                return api_error(StatusCode::BAD_REQUEST, "clip_image_invalid_image", error)
+            }
+            Err(MediaPreprocessError::Join(error)) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "media_preprocessing_failed",
+                    error,
+                )
+            }
+        };
+
+    let model_dir = requested_model_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state.clip_model_dir.clone());
+    if !infer_core::is_clip_image_model_downloaded(&model_dir) {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "clip_image_onnx_model_not_downloaded",
+            "CLIP image ONNX model is not downloaded".to_string(),
+        );
+    }
+    let cache_key = model_dir.to_string_lossy().to_string();
+    let encoders = state.clip_image.clone();
+    let result =
+        tokio::task::spawn_blocking(move || -> Result<Vec<f32>, infer_core::InferError> {
+            let encoder = match encoders.read() {
+                Ok(cached) => cached.get(&cache_key).cloned(),
+                Err(_) => {
+                    return Err(infer_core::InferError::InvalidModelOutput(
+                        "CLIP image encoder cache lock poisoned".to_string(),
+                    ))
+                }
+            };
+            let encoder = match encoder {
+                Some(encoder) => encoder,
+                None => {
+                    let new_encoder = Arc::new(infer_core::ClipImageEncoder::new(&model_dir)?);
+                    let mut cached = encoders.write().map_err(|_| {
+                        infer_core::InferError::InvalidModelOutput(
+                            "CLIP image encoder cache lock poisoned".to_string(),
+                        )
+                    })?;
+                    cached
+                        .entry(cache_key)
+                        .or_insert_with(|| new_encoder.clone())
+                        .clone()
+                }
+            };
+            encoder.encode_rgb(&input, 224, 224)
+        })
+        .await;
+
+    match result {
+        Ok(Ok(vector)) => api_ok(json!({"vector": vector, "dim": 512})),
+        Ok(Err(infer_core::InferError::ModelNotDownloaded(_))) => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "clip_image_onnx_model_not_downloaded",
+            "CLIP image ONNX model is not downloaded".to_string(),
+        ),
+        Ok(Err(error)) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "clip_image_onnx_inference_failed",
+            error.to_string(),
+        ),
+        Err(error) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "clip_image_onnx_task_failed",
+            format!("CLIP image ONNX task failed: {error}"),
         ),
     }
 }
@@ -1817,8 +1940,10 @@ mod tests {
             })),
             auth_token: "test-token".to_string(),
             wd_cache_dir: std::env::temp_dir().join("yu-infer-test-cache"),
+            clip_model_dir: std::env::temp_dir().join("yu-infer-test-clip-model"),
             wd_infer: Arc::new(RwLock::new(HashMap::new())),
             clip_text: Arc::new(RwLock::new(HashMap::new())),
+            clip_image: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -2307,7 +2432,13 @@ mod tests {
 
     #[tokio::test]
     async fn healthz_returns_ok_true() {
-        let app = build_router(test_state(vec![]));
+        let model_dir =
+            std::env::temp_dir().join(format!("yu-infer-healthz-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&model_dir);
+        std::fs::create_dir(&model_dir).unwrap();
+        let mut state = test_state(vec![]);
+        state.clip_model_dir = model_dir.clone();
+        let app = build_router(state.clone());
         let response = app
             .oneshot(
                 Request::builder()
@@ -2323,7 +2454,24 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["instance_id"], "test-instance");
-        assert_eq!(body["hailo_stub"], cfg!(hailo_stub));
+        assert_eq!(body["clip_image_onnx"], false);
+
+        std::fs::write(model_dir.join("vision_model.onnx"), b"model").unwrap();
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["clip_image_onnx"], true);
+        std::fs::remove_dir_all(model_dir).unwrap();
     }
 
     #[tokio::test]
@@ -2587,6 +2735,81 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/v1/infer/clip-image")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(
+                        json!({"image_base64": "A".repeat(4 * 1024 * 1024)}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn clip_image_onnx_rejects_missing_auth() {
+        let app = build_router(test_state(vec![]));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/infer/clip-image-onnx")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"image_base64": "not-used"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn clip_image_onnx_rejects_invalid_base64() {
+        let app = build_router(test_state(vec![]));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/infer/clip-image-onnx")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(json!({"image_base64": "%%%"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn clip_image_onnx_rejects_oversized_base64() {
+        let app = build_router(test_state(vec![]));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/infer/clip-image-onnx")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(
+                        json!({"image_base64": "A".repeat(MAX_FRAME_BASE64_BYTES + 1)}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn clip_image_onnx_body_between_axum_default_and_frame_cap_reaches_handler() {
+        let app = build_router(test_state(vec![]));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/infer/clip-image-onnx")
                     .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
                     .body(Body::from(

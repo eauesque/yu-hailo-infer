@@ -1,3 +1,5 @@
+mod clip;
+pub mod clip_image;
 pub mod clip_text;
 pub mod engine;
 pub mod error;
@@ -6,6 +8,7 @@ pub mod tags;
 pub mod yolo_labels;
 pub mod yolo_postprocess;
 
+pub use clip_image::{is_clip_image_model_downloaded, ClipImageEncoder};
 pub use clip_text::{is_clip_text_model_downloaded, ClipTextEncoder};
 pub use engine::{builtin_wd_profile, TagPrediction, TagResult, WdInferEngine};
 pub use error::InferError;

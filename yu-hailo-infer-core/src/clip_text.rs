@@ -7,10 +7,9 @@ use tokenizers::{
     TruncationStrategy,
 };
 
-use crate::InferError;
+use crate::{clip::validate_and_normalize, InferError};
 
 const MAX_SEQUENCE_LENGTH: usize = 77;
-const CLIP_EMBEDDING_DIMENSION: usize = 512;
 
 /// CPU ONNX Runtime encoder for Xenova's CLIP ViT-B/16 text model.
 pub struct ClipTextEncoder {
@@ -81,13 +80,7 @@ impl ClipTextEncoder {
         ])?;
         let (_, output) = outputs[0].try_extract_tensor::<f32>()?;
         let mut vector = output.to_vec();
-        if vector.len() != CLIP_EMBEDDING_DIMENSION {
-            return Err(InferError::InvalidModelOutput(format!(
-                "CLIP text embedding must contain {CLIP_EMBEDDING_DIMENSION} values, got {}",
-                vector.len()
-            )));
-        }
-        normalize_vector(&mut vector);
+        validate_and_normalize(&mut vector)?;
         Ok(vector)
     }
 }
@@ -95,15 +88,6 @@ impl ClipTextEncoder {
 /// Returns whether `model_dir` contains both files required by the text encoder.
 pub fn is_clip_text_model_downloaded(model_dir: &Path) -> bool {
     model_dir.join("text_model.onnx").is_file() && model_dir.join("tokenizer.json").is_file()
-}
-
-fn normalize_vector(vector: &mut [f32]) {
-    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
-    if norm >= 1e-12 {
-        for value in vector {
-            *value /= norm;
-        }
-    }
 }
 
 #[cfg(test)]
@@ -119,17 +103,5 @@ mod tests {
         assert!(!is_clip_text_model_downloaded(dir.path()));
         std::fs::write(dir.path().join("tokenizer.json"), b"tokenizer").unwrap();
         assert!(is_clip_text_model_downloaded(dir.path()));
-    }
-
-    #[test]
-    fn normalization_matches_clip_zero_norm_guard() {
-        let mut vector = vec![3.0, 4.0];
-        normalize_vector(&mut vector);
-        assert!((vector[0] - 0.6).abs() < 1e-6);
-        assert!((vector[1] - 0.8).abs() < 1e-6);
-
-        let mut zero = vec![0.0, 0.0];
-        normalize_vector(&mut zero);
-        assert_eq!(zero, vec![0.0, 0.0]);
     }
 }

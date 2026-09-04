@@ -13,3 +13,6 @@
 *.swo
 .idea/
 .vscode/
+
+# MCP server registration: names machine-local binaries, not shared
+.mcp.json

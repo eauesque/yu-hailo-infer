@@ -48,8 +48,10 @@ pub async fn run() {
         })),
         auth_token: contract.auth_token,
         wd_cache_dir: cli.wd_cache_dir,
+        clip_model_dir: router::clip_text_model_dir(None),
         wd_infer: Arc::new(RwLock::new(HashMap::new())),
         clip_text: Arc::new(RwLock::new(HashMap::new())),
+        clip_image: Arc::new(RwLock::new(HashMap::new())),
     };
     let app = router::build_router(state);
 

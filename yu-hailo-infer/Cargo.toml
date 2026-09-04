@@ -28,9 +28,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 # Aliased to the historical names so the module bodies need no churn.
-auth_core = { package = "yu-hailo-auth", version = "0.4.0", path = "../yu-hailo-auth" }
+auth_core = { package = "yu-hailo-auth", version = "0.3.0", path = "../yu-hailo-auth" }
 thiserror = { workspace = true }
-infer_core = { package = "yu-hailo-infer-core", version = "0.4.0", path = "../yu-hailo-infer-core" }
+infer_core = { package = "yu-hailo-infer-core", version = "0.3.0", path = "../yu-hailo-infer-core" }
 image = { workspace = true }
 base64 = { workspace = true }
 futures-util = { workspace = true }

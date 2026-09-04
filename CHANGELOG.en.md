@@ -7,25 +7,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-## [0.4.0] - 2026-09-03
-
-### Added
-
-- **`GET /healthz` now returns a `hailo_stub` field.** `true` when the
-  binary was built without HailoRT headers (links the stub shim), `false`
-  on a real-device build. Lets a caller (e.g. yu-server) distinguish a
-  live Hailo-10H from a sidecar-only deployment instead of inferring it
-  from probe heuristics (tracked as the permanent fix in yu_ai_manager's
-  TODO.md, v4.689.47 entry).
-- **Added `scripts/hailo_infer_smoke.py`.** A real-hardware smoke test
-  that hits `/v1/infer/*` directly on a bare `yu-hailo-infer` process — no
-  yu-server, no database, no job manager (that end-to-end coverage lives
-  in the caller's `yu_ai_manager/scripts/hailo_realhw_smoke.py`). Verified
-  all 15 applicable checks pass against a real Hailo-10H with the HEFs
-  under `~/hailo_models/` (CLIP image embedding, WD-Tagger, YOLO detect,
-  LLM generate, VLM streaming generate, speech2text). CLIP text (ONNX)
-  and WD-Tagger are reported as skipped when their model isn't present on
-  disk.
+## [Unreleased]
 
 ### Changed
 

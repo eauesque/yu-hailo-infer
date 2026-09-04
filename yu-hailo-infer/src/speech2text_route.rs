@@ -316,8 +316,10 @@ mod tests {
             })),
             auth_token: "test-token".to_string(),
             wd_cache_dir: std::env::temp_dir().join("yu-infer-test-cache"),
+            clip_model_dir: std::env::temp_dir().join("yu-infer-test-clip-model"),
             wd_infer: Arc::new(RwLock::new(HashMap::new())),
             clip_text: Arc::new(RwLock::new(HashMap::new())),
+            clip_image: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
