@@ -7,11 +7,11 @@ use tokenizers::{
     TruncationStrategy,
 };
 
-use crate::{clip::validate_and_normalize, InferError};
+use crate::{clip::validate_and_normalize, ep::build_session, InferError};
 
 const MAX_SEQUENCE_LENGTH: usize = 77;
 
-/// CPU ONNX Runtime encoder for Xenova's CLIP ViT-B/16 text model.
+/// ONNX Runtime encoder for Xenova's CLIP ViT-B/16 text model.
 pub struct ClipTextEncoder {
     session: Mutex<Session>,
     tokenizer: Tokenizer,
@@ -43,14 +43,9 @@ impl ClipTextEncoder {
         }));
 
         Ok(Self {
-            session: Mutex::new(Self::build_session(&model_dir.join("text_model.onnx"))?),
+            session: Mutex::new(build_session(&model_dir.join("text_model.onnx"))?),
             tokenizer,
         })
-    }
-
-    fn build_session(model_path: &Path) -> Result<Session, InferError> {
-        // ORT uses CPUExecutionProvider by default when no provider list is supplied.
-        Ok(Session::builder()?.commit_from_file(model_path)?)
     }
 
     pub fn encode(&self, text: &str) -> Result<Vec<f32>, InferError> {

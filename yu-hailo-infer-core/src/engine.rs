@@ -6,6 +6,7 @@ use ort::{session::Session, value::Value};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    ep::build_session,
     profile::WdProfileSpec,
     tags::{load_tags, TagMeta},
     InferError,
@@ -106,7 +107,7 @@ impl WdInferEngine {
         if !model_path.exists() {
             return Err(InferError::ModelNotDownloaded(model_dir.to_owned()));
         }
-        let session = Self::build_session(&model_path)?;
+        let session = build_session(&model_path)?;
         let tag_meta = load_tags(
             model_dir,
             &spec.tag_source,
@@ -124,36 +125,6 @@ impl WdInferEngine {
             model_id,
             spec,
         })
-    }
-
-    /// Build an ORT session, trying GPU EPs in priority order then falling back to CPU.
-    ///
-    /// Compile with `--features cuda` or `--features rocm` to enable GPU paths.
-    /// GPU EPs fail gracefully at runtime if the hardware/driver is absent.
-    fn build_session(model_path: &Path) -> Result<Session, InferError> {
-        #[cfg(any(feature = "cuda", feature = "rocm"))]
-        {
-            let mut eps: Vec<ort::execution_providers::ExecutionProviderDispatch> = Vec::new();
-            #[cfg(feature = "cuda")]
-            {
-                tracing::info!("Requesting CUDA execution provider");
-                eps.push(ort::ep::CUDA::default().build());
-            }
-            #[cfg(feature = "rocm")]
-            {
-                tracing::info!("Requesting ROCm execution provider");
-                eps.push(ort::ep::ROCm::default().build());
-            }
-            // CPU must be explicit — with_execution_providers replaces the default EP list
-            // and does not automatically append CPU. ORT tries EPs in order; CPU is the fallback.
-            eps.push(ort::ep::CPU::default().build());
-            return Ok(Session::builder()?
-                .with_execution_providers(eps)?
-                .commit_from_file(model_path)?);
-        }
-
-        #[allow(unreachable_code)]
-        Ok(Session::builder()?.commit_from_file(model_path)?)
     }
 
     pub fn run(&self, image_path: &Path) -> Result<TagResult, InferError> {

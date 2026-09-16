@@ -3,7 +3,7 @@ use std::{path::Path, sync::Mutex};
 use ndarray::Array4;
 use ort::{session::Session, value::Value};
 
-use crate::{clip::validate_and_normalize, InferError};
+use crate::{clip::validate_and_normalize, ep::build_session, InferError};
 
 const IMAGE_WIDTH: u32 = 224;
 const IMAGE_HEIGHT: u32 = 224;
@@ -11,7 +11,7 @@ const MEAN: [f32; 3] = [0.48145466, 0.4578275, 0.40821073];
 #[allow(clippy::excessive_precision)] // CLIP's published preprocessing constants.
 const STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
 
-/// CPU ONNX Runtime encoder for Xenova's CLIP ViT-B/16 vision model.
+/// ONNX Runtime encoder for Xenova's CLIP ViT-B/16 vision model.
 pub struct ClipImageEncoder {
     session: Mutex<Session>,
 }
@@ -22,9 +22,7 @@ impl ClipImageEncoder {
             return Err(InferError::ModelNotDownloaded(model_dir.to_owned()));
         }
         Ok(Self {
-            session: Mutex::new(
-                Session::builder()?.commit_from_file(model_dir.join("vision_model.onnx"))?,
-            ),
+            session: Mutex::new(build_session(&model_dir.join("vision_model.onnx"))?),
         })
     }
 

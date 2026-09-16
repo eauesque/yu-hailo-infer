@@ -11,15 +11,32 @@ repository.workspace = true
 authors.workspace    = true
 
 [features]
-# Enable CUDA Execution Provider (requires CUDA-enabled ORT binary or ORT_DYLIB_PATH).
+# Execution providers, off by default. Whether a provider needs `load-dynamic`
+# is decided by ort-sys's own prebuilt table (ort-sys/build/download/dist.txt):
+# its resolver only varies the downloaded binary for `cuda`/`tensorrt`,
+# `nvrtx`, `webgpu`, `training` and `rocm`, and only ships feature sets
+# `none`, `cu12`, `cu13`, `nvrtx` and `wgpu`. So:
+#   - cuda resolves to a real CUDA-enabled download (cu12/cu13, picked from
+#     CUDA_HOME/nvcc), and needs nothing else.
+#   - coreml is not in the resolver at all, so it links the plain `none`
+#     download -- which on Apple targets is an ORT build with CoreML compiled
+#     in. No separate library to point at.
+#   - rocm IS in the resolver but no prebuilt row carries it, so resolution
+#     falls back to `none` with a warning and the provider would fail to
+#     register at runtime. load-dynamic is the only way to reach a real ROCm
+#     build here.
+#   - directml and openvino are absent from both the resolver and every
+#     prebuilt feature set, so they too need an externally supplied library.
+# load-dynamic means the ONNX Runtime library is found at runtime via
+# ORT_DYLIB_PATH instead of being linked at build time.
 cuda = ["ort/cuda"]
-# Enable ROCm Execution Provider (requires ROCm-enabled ORT binary or ORT_DYLIB_PATH).
-rocm = ["ort/rocm"]
-# Enable DirectML Execution Provider on Windows. Temporary build/runtime fallback.
+# ROCm has no prebuilt binary; point ORT_DYLIB_PATH at a --use_rocm build.
+rocm = ["ort/rocm", "ort/load-dynamic"]
+# DirectML on Windows; point ORT_DYLIB_PATH at a DirectML-enabled build.
 directml = ["ort/directml", "ort/load-dynamic"]
-# Enable CoreML Execution Provider on macOS (Apple Silicon / Intel Mac).
+# CoreML on macOS (Apple Silicon / Intel Mac); served by the default download.
 coreml = ["ort/coreml"]
-# Enable OpenVINO Execution Provider (Intel GPU/VPU on Linux).
+# OpenVINO (Intel GPU/NPU); point ORT_DYLIB_PATH at an OpenVINO-enabled build.
 openvino = ["ort/openvino", "ort/load-dynamic"]
 
 [dependencies]
