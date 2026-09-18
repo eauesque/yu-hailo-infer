@@ -7,6 +7,28 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.4.1] - 2026-09-18
+
+### Fixed
+
+- **`/v1/infer/wd` returned a 500 that carried no cause.** The body was the
+  fixed string `{"error":"inference failed"}`; the actual `InferError` only
+  ever reached the sidecar's own log. The caller (yu-server) wraps that body
+  verbatim into `BackendError` and puts it on the batch job label, so the
+  reason never reached the place an operator looks. A `detail` field now
+  carries `e.to_string()`, following the same convention already used by
+  `unsupported profile`.
+  - **The distinction flips the correct response.** One corrupt image
+    (`InferError::Image`) only needs that file skipped; a dead ONNX session
+    (`InferError::Ort`) will fail every remaining file the same way. Given one
+    status and one message for both, yu-server can only guess — it aborts
+    after 20 consecutive `BackendError`s.
+  - The two sibling sites with the same defect (profile fingerprint failure,
+    `spawn_blocking` panic) got `detail` as well. Fixing one and leaving the
+    family means stalling at the next one.
+  - The `error` field keeps its old value, so any caller matching on that
+    string still works.
+
 ## [0.4.0] - 2026-09-03
 
 ### Added

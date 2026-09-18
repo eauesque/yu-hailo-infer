@@ -1872,7 +1872,7 @@ async fn infer_wd(
             tracing::error!("yu-infer wd profile fingerprint failed: {error}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "internal error"})),
+                Json(json!({"error": "internal error", "detail": error.to_string()})),
             )
                 .into_response();
         }
@@ -1908,9 +1908,13 @@ async fn infer_wd(
         }
         Ok(Err(e)) => {
             tracing::error!("yu-infer wd inference error: {e}");
+            // The caller only ever sees this body: yu-server logs it and the
+            // batch job label carries it. Without the cause an operator cannot
+            // tell a corrupt single image from a dead ONNX session, which are
+            // the same 500 but opposite responses -- skip the file, or stop.
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "inference failed"})),
+                Json(json!({"error": "inference failed", "detail": e.to_string()})),
             )
                 .into_response()
         }
@@ -1918,7 +1922,7 @@ async fn infer_wd(
             tracing::error!("yu-infer spawn_blocking panic: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "internal error"})),
+                Json(json!({"error": "internal error", "detail": e.to_string()})),
             )
                 .into_response()
         }
