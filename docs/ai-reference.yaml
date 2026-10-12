@@ -75,10 +75,19 @@ response_envelope:
   auth_failure_exception: '401 responses use {"error": "invalid auth token"} instead — see security_model.auth_model.failure_response'
 
 features:
+  - name: embeddinggemma2_text
+    endpoints: ["POST /v1/infer/text-embed"]
+    auth_required: true
+    purpose: "Experimental host FP32 text embedding, fixed revision daa72c51243991dfcaf9f9137d2c573d8f7790c0; server owns query/document prefix and returns normalized256 vector. No image embedding or model download."
+    config_fields: ["text", "title (optional document title)", "task (query/document, default query)", "dim (256 only)", "model_dir (optional absolute path)"]
+    model_source: "Pinned artifact directory at ~/.cache/yu_ai_manager/embeddinggemma2/<revision>; verified private snapshot adds about1.1 GB temporary disk."
+    limits: "16 KiB combined text/title;8192 tokens;1 active plus4 FIFO waiters; overflow503. Crash cleanup, Pi5, GPU and production throughput unverified."
+    related_code: "yu-hailo-infer/src/text_embed_route.rs; yu-hailo-infer-core/src/embeddinggemma2.rs"
+
   - name: healthz
     endpoints: ["GET /healthz"]
     auth_required: false
-    purpose: "Liveness probe. Returns {ok: true, uptime_secs, instance_id, hailo_stub}. hailo_stub is true when the binary was built without HailoRT headers (links the stub shim), letting callers (e.g. yu-server) distinguish a live device from a sidecar-only deployment."
+    purpose: "Liveness probe. Returns {ok: true, uptime_secs, instance_id, hailo_stub} and text_embed endpoint capability (model, revision, precision, dim, verification: at_load). Capability does not assert artifact presence or verified encoder readiness. hailo_stub is true when the binary links the HailoRT stub shim."
     related_code: "yu-hailo-infer/src/router.rs::healthz"
 
   - name: scan_roots_hot_reload

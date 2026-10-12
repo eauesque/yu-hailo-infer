@@ -10,6 +10,7 @@ pub mod hailort;
 pub mod router;
 pub mod speech2text_route;
 pub mod startup;
+mod text_embed_route;
 
 use clap::Parser;
 use std::collections::HashMap;

@@ -1,0 +1,15 @@
+{
+  "model": "onnx-community/embeddinggemma-2-ONNX",
+  "revision": "daa72c51243991dfcaf9f9137d2c573d8f7790c0",
+  "precision": "fp32",
+  "preprocessing": "eg2-search-v1",
+  "dim": 256,
+  "producer": "Independent Python ONNX Runtime inference from public synthetic Japanese/English query/document inputs",
+  "onnxruntime": "1.25.1",
+  "provider": "CPUExecutionProvider",
+  "date": "2026-10-12",
+  "source": "yu_ai_manager/tests/fixtures/embeddinggemma2_fp32_parity.json",
+  "fixture_sha256": "e3a66e40cc40cc71e76d73a673594febbef9816a2e6ad89e59b63c5770d9d055",
+  "source_sha256": "22d0d4d0028e564132aefca8628aaf72aee7d2ffa5f06f4be41998a8818b1301",
+  "scope": "Cross-language inference parity for the same ONNX export; not PyTorch export validation or retrieval quality evidence."
+}

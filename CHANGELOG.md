@@ -7,6 +7,17 @@
 
 ---
 
+## [0.5.0] - 2026-10-12
+
+### Added
+
+- 読込は検証時に複製した非公開 snapshot のみから行い、セッション終了まで保持する。元の path が検証後に変更されても未検証の内容を読み込まない。下載済み模型に加えて約1.04 GiBの一時ディスク領域を必要とする。公開 parity fixture に生成元・SHA-256 provenance を添付した。
+- 固定模型カードは [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) を宣言する。Google の[ライセンス案内](https://ai.google.dev/gemma/apache_2)と[責任ある利用の案内](https://ai.google.dev/responsible)を参照できる。
+- 明示選択の実験的 host 推論 `POST /v1/infer/text-embed` を追加。既存 Bearer 認証と `data` 応答形式を使用する。
+- EmbeddingGemma 2 固定 revision `daa72c51243991dfcaf9f9137d2c573d8f7790c0` の FP32 のみ使用。`text`、任意 `title`、`task` (`query` 既定 / `document`)、`dim` (256 のみ)、任意の絶対 `model_dir` を受け付ける。接頭辞はサーバが付与し、8192 token 上限、768→256 切り出し後 L2 正規化を行う。
+- 模型 root は `tokenizer.json` と `onnx/model.onnx`・`onnx/model.onnx_data` を持つ。既定 root は `~/.cache/yu_ai_manager/embeddinggemma2/<revision>/`。読込時にサイズ・SHA-256 を検証し、変更時は再検証する。下載は呼出元が担う。
+- 応答 `data` は `vector`, `dim`, `model`, `revision`, `precision`, `preprocessing` を含む。本文と題名は合計16 KiBまで。同時実行1件・待機4件を上限とし、超過は503。Pi 5 検証は未実施。
+
 ## [0.4.1] - 2026-09-18
 
 ### Fixed

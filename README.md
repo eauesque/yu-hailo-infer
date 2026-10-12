@@ -12,6 +12,7 @@ Hailo-10H向けRustネイティブ推論マイクロサービス。HTTP経由で
 | 機能 | エンドポイント | 状態 |
 |---|---|---|
 | CLIP画像embedding | `POST /v1/infer/clip-image` | 対応 |
+| EmbeddingGemma 2文章embedding | `POST /v1/infer/text-embed` | 実験的 host FP32、256次元 |
 | CLIPテキストembedding | `POST /v1/infer/clip-text` | 対応 |
 | WD-Taggerタグ推論 | `POST /v1/infer/wd` | 対応 |
 | LLMテキスト生成 | `POST /v1/infer/llm/generate`(+`/stream`) | 対応 |
@@ -66,3 +67,9 @@ curl -X POST http://127.0.0.1:8100/v1/infer/clip-text \
 ## ライセンス
 
 MIT
+
+## EmbeddingGemma 2
+
+`POST /v1/infer/text-embed` accepts `{"text":"桜の花","task":"query","dim":256}` with the existing bearer authentication. For documents use `task:"document"` and an optional `title`; the server adds the search prefix. The success envelope contains `data.vector`, `dim`, `model`, `revision`, `precision`, and `preprocessing`.
+
+Only pinned FP32 revision `daa72c51243991dfcaf9f9137d2c573d8f7790c0` is supported. Place `tokenizer.json`, `onnx/model.onnx`, and `onnx/model.onnx_data` under `~/.cache/yu_ai_manager/embeddinggemma2/<revision>` or an absolute `model_dir`. Artifact sizes and SHA-256 must match the manifest in `embeddinggemma2.rs`; no automatic download occurs here. Loading uses a private verified snapshot (~1.1 GB additional disk space), removed on graceful cache destruction; forced termination may leave residue. Input text/title is limited to16 KiB combined, then8192 tokens. One active request and four FIFO waiters are allowed; overflow returns503. Pi5, GPU behavior, and production throughput are unverified.

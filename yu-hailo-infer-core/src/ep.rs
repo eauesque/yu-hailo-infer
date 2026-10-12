@@ -16,7 +16,19 @@ use crate::InferError;
 /// Build an ORT session that tries every compiled-in GPU provider in order and
 /// falls back to CPU.
 pub(crate) fn build_session(model_path: &Path) -> Result<Session, InferError> {
-    let builder = Session::builder()?;
+    build_session_with_threads(model_path, None)
+}
+
+pub(crate) fn build_session_with_threads(
+    model_path: &Path,
+    intra_threads: Option<usize>,
+) -> Result<Session, InferError> {
+    let mut builder = Session::builder()?;
+    if let Some(threads) = intra_threads {
+        builder = builder
+            .with_intra_threads(threads)
+            .map_err(ort::Error::from)?;
+    }
     let providers = gpu_providers();
     let mut builder = if providers.is_empty() {
         // No GPU feature compiled in: ORT's own default list is CPU-only, and

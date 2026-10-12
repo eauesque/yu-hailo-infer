@@ -1,6 +1,7 @@
 mod clip;
 pub mod clip_image;
 pub mod clip_text;
+pub mod embeddinggemma2;
 pub mod engine;
 mod ep;
 pub mod error;

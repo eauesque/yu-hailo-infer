@@ -125,6 +125,15 @@ entries:
     key_symbols: []
     when_to_read: "認証方式・トークン検証について聞かれた時"
 
+  - path: yu-hailo-infer-core/src/embeddinggemma2.rs
+    purpose: 固定FP32文章模型のartifact検証・private snapshot・tokenizer・256次元正規化・cache。
+    key_symbols: [Encoder, EmbeddingGemma2Cache]
+    when_to_read: EmbeddingGemma 2 の模型読込・数値契約・安全境界を確認するとき
+  - path: yu-hailo-infer/src/text_embed_route.rs
+    purpose: 認証済文章埋込HTTP入力検証・queue・取消寿命管理。
+    key_symbols: [text_embed]
+    when_to_read: text-embed の通信契約・同時実行・取消を確認するとき
+
 notes:
   - "各エントリのkey_symbolsは実装確定後に埋める(現時点は雛形のため一部空欄)。"
   - "usearch/vectors.db等のベクトル検索・永続化はこのリポジトリの範囲外(利用側アプリの責務)。"

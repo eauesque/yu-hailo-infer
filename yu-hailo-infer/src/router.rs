@@ -140,6 +140,12 @@ pub fn build_router(state: AppState) -> Router {
             )),
         )
         .route("/v1/infer/clip-text", post(clip_text))
+        .route(
+            "/v1/infer/text-embed",
+            post(crate::text_embed_route::text_embed).layer(axum::Extension(Arc::new(
+                std::sync::Mutex::new(infer_core::embeddinggemma2::EmbeddingGemma2Cache::default()),
+            ))),
+        )
         .route("/v1/infer/speech2text/tokenize", post(speech2text_tokenize))
         .route(
             "/v1/infer/speech2text/transcribe",
@@ -166,6 +172,7 @@ async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
         "uptime_secs": state.started_at.elapsed().as_secs(),
         "instance_id": state.instance_id,
         "clip_image_onnx": infer_core::is_clip_image_model_downloaded(&state.clip_model_dir),
+        "text_embed": {"model": infer_core::embeddinggemma2::MODEL, "revision": infer_core::embeddinggemma2::REVISION, "precision": "fp32", "dim": 256, "verification": "at_load"},
         // HailoRT headers were absent at build time, so this binary links the
         // stub shim instead of real hardware. Callers (e.g. yu-server) use
         // this to distinguish a live device from a sidecar-only deployment.
@@ -2463,6 +2470,15 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["instance_id"], "test-instance");
         assert_eq!(body["clip_image_onnx"], false);
+        assert_eq!(
+            body["text_embed"]["model"],
+            infer_core::embeddinggemma2::MODEL
+        );
+        assert_eq!(
+            body["text_embed"]["revision"],
+            infer_core::embeddinggemma2::REVISION
+        );
+        assert_eq!(body["text_embed"]["verification"], "at_load");
         assert_eq!(body["hailo_stub"], cfg!(hailo_stub));
 
         std::fs::write(model_dir.join("vision_model.onnx"), b"model").unwrap();
