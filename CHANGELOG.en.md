@@ -7,6 +7,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.6.1] - 2026-10-14
+
+### Fixed
+
+- Fetch only `sentence_embedding` during Rust EmbeddingGemma 2 inference, excluding the unused `last_hidden_state` output. Preserve FP32, provider selection, and 256-dimensional normalization. This does not promise reduced transformer computation or GPU speedups.
+- Verify the production encode path against all-output retrieval with a two-output fixture running in real ONNX Runtime.
+
 ## [0.6.0] - 2026-10-13
 
 ### Added

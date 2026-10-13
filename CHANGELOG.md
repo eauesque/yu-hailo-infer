@@ -7,6 +7,13 @@
 
 ---
 
+## [0.6.1] - 2026-10-14
+
+### Fixed
+
+- EmbeddingGemma 2 の Rust 推論で `sentence_embedding` のみ取得し、未使用の `last_hidden_state` 出力取得を除く。FP32・provider 選択・256 次元正規化を維持する。内部 transformer 計算の削減や GPU 速度向上は保証しない。
+- 実 ONNX Runtime の二出力 fixture で本番 encode 経路と全出力取得時の一致を検証する。
+
 ## [0.6.0] - 2026-10-13
 
 ### Added

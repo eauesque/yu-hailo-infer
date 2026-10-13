@@ -9,7 +9,7 @@ use std::{
 
 use ndarray::Array2;
 use ort::{
-    session::Session,
+    session::{OutputSelector, RunOptions, Session},
     value::{TensorElementType, Value, ValueType},
 };
 use sha2::{Digest, Sha256};
@@ -273,13 +273,24 @@ impl Encoder {
                 .collect(),
         )
         .map_err(|e| invalid(e.to_string()))?;
-        let outputs = self.session.run(ort::inputs![
-            "input_ids" => Value::from_array(input_ids)?,
-            "attention_mask" => Value::from_array(attention_mask)?,
-            "image_features" => Value::from_array(Array2::<f32>::zeros((0, 512)))?,
-            "video_features" => Value::from_array(Array2::<f32>::zeros((0, 512)))?,
-            "audio_features" => Value::from_array(Array2::<f32>::zeros((0, 512)))?,
-        ])?;
+        let options = RunOptions::new()?
+            .with_outputs(OutputSelector::no_default().with("sentence_embedding"));
+        let outputs = self.session.run_with_options(
+            ort::inputs![
+                "input_ids" => Value::from_array(input_ids)?,
+                "attention_mask" => Value::from_array(attention_mask)?,
+                "image_features" => Value::from_array(Array2::<f32>::zeros((0, 512)))?,
+                "video_features" => Value::from_array(Array2::<f32>::zeros((0, 512)))?,
+                "audio_features" => Value::from_array(Array2::<f32>::zeros((0, 512)))?,
+            ],
+            &options,
+        )?;
+        #[cfg(test)]
+        assert_eq!(
+            outputs.len(),
+            1,
+            "only sentence_embedding should be fetched"
+        );
         let output = outputs
             .get("sentence_embedding")
             .ok_or_else(|| invalid("missing sentence_embedding"))?;
@@ -344,6 +355,57 @@ fn normalize(shape: &[i64], values: &[f32]) -> Result<Vec<f32>, InferError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encoder_fetches_only_sentence_and_matches_all_outputs() {
+        let mut session = Session::builder()
+            .unwrap()
+            .commit_from_memory(include_bytes!("../tests/fixtures/eg2_two_outputs.onnx"))
+            .unwrap();
+        validate_contract(&session).unwrap();
+        let baseline = session
+            .run(ort::inputs![
+                "input_ids" => Value::from_array(Array2::<i64>::zeros((1, 1))).unwrap(),
+                "attention_mask" => Value::from_array(Array2::<i64>::ones((1, 1))).unwrap(),
+                "image_features" => Value::from_array(Array2::<f32>::zeros((0, 512))).unwrap(),
+                "video_features" => Value::from_array(Array2::<f32>::zeros((0, 512))).unwrap(),
+                "audio_features" => Value::from_array(Array2::<f32>::zeros((0, 512))).unwrap(),
+            ])
+            .unwrap();
+        assert_eq!(baseline.len(), 2);
+        assert!(baseline.get("last_hidden_state").is_some());
+        let (shape, values) = baseline["sentence_embedding"]
+            .try_extract_tensor::<f32>()
+            .unwrap();
+        let expected = normalize(shape, values).unwrap();
+        drop(baseline);
+        let tokenizer = Tokenizer::new(
+            tokenizers::models::wordlevel::WordLevel::builder()
+                .vocab([("fixture".to_owned(), 0)].into_iter().collect())
+                .unk_token("fixture".to_owned())
+                .build()
+                .unwrap(),
+        );
+        let mut encoder = Encoder {
+            session,
+            execution: text_execution(),
+            tokenizer,
+            _snapshot: tempfile::tempdir().unwrap(),
+        };
+        let actual = encoder.encode("fixture").unwrap();
+        assert_eq!(actual.len(), DIM);
+        assert_eq!(
+            actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+        let norm = actual
+            .iter()
+            .map(|&v| f64::from(v).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        assert!((norm - 1.0).abs() < 1e-7);
+        assert!(actual[DIM - 1] > actual[0]);
+    }
 
     #[test]
     fn execution_is_unknown_before_load_and_while_busy() {
