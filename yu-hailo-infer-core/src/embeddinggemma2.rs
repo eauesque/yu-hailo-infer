@@ -15,7 +15,11 @@ use ort::{
 use sha2::{Digest, Sha256};
 use tokenizers::{Tokenizer, TruncationParams};
 
-use crate::{ep::build_session_with_threads, InferError};
+pub use crate::ep::OnnxExecution;
+use crate::{
+    ep::{build_text_session, text_execution},
+    InferError,
+};
 
 pub const MODEL: &str = "embeddinggemma2_text_256";
 pub const REVISION: &str = "daa72c51243991dfcaf9f9137d2c573d8f7790c0";
@@ -180,6 +184,18 @@ pub struct EmbeddingGemma2Cache {
 }
 
 impl EmbeddingGemma2Cache {
+    pub fn execution(&self) -> OnnxExecution {
+        self.cached
+            .as_ref()
+            .map_or_else(text_execution, |(_, encoder)| encoder.execution.clone())
+    }
+
+    pub fn busy_execution() -> OnnxExecution {
+        let mut execution = text_execution();
+        execution.loaded = None;
+        execution
+    }
+
     pub fn encode(
         &mut self,
         dir: &Path,
@@ -209,6 +225,7 @@ impl EmbeddingGemma2Cache {
 
 struct Encoder {
     session: Session,
+    execution: OnnxExecution,
     tokenizer: Tokenizer,
     // Drop after Session: external tensor data may remain mapped for its lifetime.
     _snapshot: tempfile::TempDir,
@@ -227,10 +244,11 @@ impl Encoder {
             }))
             .map_err(|e| InferError::Tokenizer(e.to_string()))?;
         // Match the four CPU threads used by the host adoption benchmark.
-        let session = build_session_with_threads(&dir.join("onnx/model.onnx"), Some(4))?;
+        let (session, execution) = build_text_session(&dir.join("onnx/model.onnx"))?;
         validate_contract(&session)?;
         Ok(Self {
             session,
+            execution,
             tokenizer,
             _snapshot: snapshot,
         })
@@ -326,6 +344,17 @@ fn normalize(shape: &[i64], values: &[f32]) -> Result<Vec<f32>, InferError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_is_unknown_before_load_and_while_busy() {
+        let unloaded = EmbeddingGemma2Cache::default().execution();
+        assert_eq!(unloaded.loaded, Some(false));
+        assert!(unloaded.registered_providers.is_none());
+        let busy = EmbeddingGemma2Cache::busy_execution();
+        assert_eq!(busy.loaded, None);
+        assert!(busy.registered_providers.is_none());
+        assert_eq!(busy.requested_providers, unloaded.requested_providers);
+    }
 
     const PARITY: &str = include_str!("../tests/fixtures/embeddinggemma2_fp32_parity.json");
 
@@ -527,6 +556,17 @@ mod tests {
                 0o700
             );
         }
+        let execution = cache.execution();
+        assert_eq!(execution.loaded, Some(true));
+        assert!(execution
+            .registered_providers
+            .as_ref()
+            .unwrap()
+            .contains(&"CPUExecutionProvider"));
+        println!(
+            "onnx_execution={}",
+            serde_json::to_string(&execution).unwrap()
+        );
         println!(
             "{} parity cases, minimum cosine {minimum_cosine}",
             rows.len()

@@ -7,6 +7,14 @@
 
 ---
 
+## [0.6.0] - 2026-10-13
+
+### Added
+
+- EmbeddingGemma 2 の CUDA / ROCm / DirectML 優先 FP32 session と CPU fallback を追加。CUDA TF32 を無効化し、DirectML の sequential / memory pattern 制約を適用する。EG2 の CoreML / OpenVINO は精度確認まで CPU fallback、既存 CLIP 等の provider 対応を保持する。
+- `/healthz` の `text_embed.onnx_execution` に要求 provider・登録 provider・loaded 状態を追加。読込前は登録 unknown、推論中の lock 待ちを避ける。登録は全演算の GPU 実行を保証しない。
+- 固定 FP32 artifact の CPU parity と provider feature compile を検証。GPU 実機の数値一致・速度は未検証。
+
 ## [0.5.0] - 2026-10-12
 
 ### Added

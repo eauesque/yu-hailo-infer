@@ -36,6 +36,10 @@ This is the service itself, not a `-sys` binding crate. It targets the Hailo-10H
 
 ## Quick Start
 
+Enable existing Cargo features `cuda`, `rocm`, `directml`, `coreml` or `openvino` for GPU providers; the default build is CPU-only. For example: `cargo build --release -p yu-hailo-infer --features cuda`. ROCm, DirectML and OpenVINO require a matching ONNX Runtime via `ORT_DYLIB_PATH`. EmbeddingGemma 2 uses FP32 CUDA (TF32 disabled), ROCm or DirectML; EG2 CoreML/OpenVINO use CPU until precision is validated. Existing CLIP provider support is preserved.
+
+`/healthz` reports requested and registered providers under `text_embed.onnx_execution`. Registration is unknown before loading or while the inference lock is held, and does not guarantee every node executes on GPU. Hardware GPU numerical parity and throughput remain unverified.
+
 ```bash
 cargo build --release -p yu-hailo-infer
 

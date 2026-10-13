@@ -7,6 +7,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.6.0] - 2026-10-13
+
+### Added
+
+- FP32 CUDA/ROCm/DirectML sessions and CPU fallback for EmbeddingGemma 2, with CUDA TF32 disabled and DirectML session constraints. EG2 CoreML/OpenVINO remain on CPU until precision is verified; existing CLIP provider support is preserved.
+- Requested/registered providers and loaded state in `/healthz` under `text_embed.onnx_execution`, without waiting on an active inference lock. Registration does not prove every node executes on GPU.
+- Fixed-artifact CPU parity and GPU feature compilation checks. Hardware GPU parity and throughput remain unverified.
+
 ## [0.5.0] - 2026-10-12
 
 ### Added

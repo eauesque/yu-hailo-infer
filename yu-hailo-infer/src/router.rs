@@ -115,8 +115,14 @@ pub struct AppState {
 }
 
 pub fn build_router(state: AppState) -> Router {
+    let text_cache = Arc::new(std::sync::Mutex::new(
+        infer_core::embeddinggemma2::EmbeddingGemma2Cache::default(),
+    ));
     Router::new()
-        .route("/healthz", get(healthz))
+        .route(
+            "/healthz",
+            get(healthz).layer(axum::Extension(text_cache.clone())),
+        )
         .route("/_internal/scan-roots-changed", post(scan_roots_changed))
         .route("/v1/infer/wd", post(infer_wd))
         .route("/v1/infer/yolo/metadata", get(yolo_metadata))
@@ -142,9 +148,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/infer/clip-text", post(clip_text))
         .route(
             "/v1/infer/text-embed",
-            post(crate::text_embed_route::text_embed).layer(axum::Extension(Arc::new(
-                std::sync::Mutex::new(infer_core::embeddinggemma2::EmbeddingGemma2Cache::default()),
-            ))),
+            post(crate::text_embed_route::text_embed).layer(axum::Extension(text_cache)),
         )
         .route("/v1/infer/speech2text/tokenize", post(speech2text_tokenize))
         .route(
@@ -166,13 +170,22 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn healthz(
+    State(state): State<AppState>,
+    axum::Extension(cache): axum::Extension<
+        Arc<std::sync::Mutex<infer_core::embeddinggemma2::EmbeddingGemma2Cache>>,
+    >,
+) -> Json<serde_json::Value> {
+    let execution = match cache.try_lock() {
+        Ok(cache) => cache.execution(),
+        Err(_) => infer_core::embeddinggemma2::EmbeddingGemma2Cache::busy_execution(),
+    };
     Json(json!({
         "ok": true,
         "uptime_secs": state.started_at.elapsed().as_secs(),
         "instance_id": state.instance_id,
         "clip_image_onnx": infer_core::is_clip_image_model_downloaded(&state.clip_model_dir),
-        "text_embed": {"model": infer_core::embeddinggemma2::MODEL, "revision": infer_core::embeddinggemma2::REVISION, "precision": "fp32", "dim": 256, "verification": "at_load"},
+        "text_embed": {"model": infer_core::embeddinggemma2::MODEL, "revision": infer_core::embeddinggemma2::REVISION, "precision": "fp32", "dim": 256, "verification": "at_load", "onnx_execution": execution},
         // HailoRT headers were absent at build time, so this binary links the
         // stub shim instead of real hardware. Callers (e.g. yu-server) use
         // this to distinguish a live device from a sidecar-only deployment.
@@ -2479,6 +2492,8 @@ mod tests {
             infer_core::embeddinggemma2::REVISION
         );
         assert_eq!(body["text_embed"]["verification"], "at_load");
+        assert_eq!(body["text_embed"]["onnx_execution"]["loaded"], false);
+        assert!(body["text_embed"]["onnx_execution"]["registered_providers"].is_null());
         assert_eq!(body["hailo_stub"], cfg!(hailo_stub));
 
         std::fs::write(model_dir.join("vision_model.onnx"), b"model").unwrap();
@@ -2497,6 +2512,21 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["clip_image_onnx"], true);
         std::fs::remove_dir_all(model_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn healthz_does_not_wait_for_text_inference_lock() {
+        use futures_util::FutureExt;
+        let cache = Arc::new(std::sync::Mutex::new(
+            infer_core::embeddinggemma2::EmbeddingGemma2Cache::default(),
+        ));
+        let _guard = cache.lock().unwrap();
+        let Json(body) = healthz(State(test_state(vec![])), axum::Extension(cache.clone()))
+            .now_or_never()
+            .expect("health must not wait for the inference lock");
+        assert_eq!(body["ok"], true);
+        assert!(body["text_embed"]["onnx_execution"]["loaded"].is_null());
+        assert!(body["text_embed"]["onnx_execution"]["registered_providers"].is_null());
     }
 
     #[tokio::test]

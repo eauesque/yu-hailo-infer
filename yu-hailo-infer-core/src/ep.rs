@@ -13,6 +13,91 @@ use ort::{ep::ExecutionProviderDispatch, session::Session};
 
 use crate::InferError;
 
+/// Registration describes session options, not the devices assigned to graph nodes.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct OnnxExecution {
+    pub requested_providers: Vec<&'static str>,
+    pub registered_providers: Option<Vec<&'static str>>,
+    pub loaded: Option<bool>,
+}
+
+pub(crate) fn text_execution() -> OnnxExecution {
+    OnnxExecution {
+        requested_providers: text_providers().into_iter().map(|(name, _)| name).collect(),
+        registered_providers: None,
+        loaded: Some(false),
+    }
+}
+
+fn text_providers() -> Vec<(&'static str, ExecutionProviderDispatch)> {
+    vec![
+        #[cfg(feature = "cuda")]
+        (
+            "CUDAExecutionProvider",
+            ort::ep::CUDA::default().with_tf32(false).build(),
+        ),
+        #[cfg(feature = "rocm")]
+        ("ROCmExecutionProvider", ort::ep::ROCm::default().build()),
+        #[cfg(feature = "directml")]
+        ("DmlExecutionProvider", ort::ep::DirectML::default().build()),
+        // CoreML/OpenVINO EG2 arithmetic needs parity validation before adoption.
+        ("CPUExecutionProvider", ort::ep::CPU::default().build()),
+    ]
+}
+
+pub(crate) fn build_text_session(
+    model_path: &Path,
+) -> Result<(Session, OnnxExecution), InferError> {
+    let mut builder = Session::builder()?
+        .with_intra_threads(4)
+        .map_err(ort::Error::from)?;
+    #[cfg(feature = "directml")]
+    {
+        builder = builder
+            .with_memory_pattern(false)
+            .map_err(ort::Error::from)?
+            .with_parallel_execution(false)
+            .map_err(ort::Error::from)?;
+    }
+    let mut execution = text_execution();
+    let mut registered = Vec::new();
+    for (name, provider) in text_providers() {
+        builder = match builder.with_execution_providers([provider.error_on_failure()]) {
+            Ok(next) => {
+                registered.push(name);
+                next
+            }
+            Err(error) if name != "CPUExecutionProvider" => {
+                tracing::warn!(provider = name, %error, "Text GPU provider registration failed; retaining CPU fallback");
+                error.recover()
+            }
+            Err(error) => return Err(ort::Error::from(error).into()),
+        };
+    }
+    let session = match builder.commit_from_file(model_path) {
+        Ok(session) => session,
+        Err(error)
+            if registered
+                .iter()
+                .any(|name| *name != "CPUExecutionProvider") =>
+        {
+            tracing::warn!(%error, "Text GPU session load failed; retrying CPU");
+            let mut cpu = Session::builder()?
+                .with_intra_threads(4)
+                .map_err(ort::Error::from)?
+                .with_execution_providers([ort::ep::CPU::default().build().error_on_failure()])
+                .map_err(ort::Error::from)?;
+            let session = cpu.commit_from_file(model_path)?;
+            registered = vec!["CPUExecutionProvider"];
+            session
+        }
+        Err(error) => return Err(error.into()),
+    };
+    execution.registered_providers = Some(registered);
+    execution.loaded = Some(true);
+    Ok((session, execution))
+}
+
 /// Build an ORT session that tries every compiled-in GPU provider in order and
 /// falls back to CPU.
 pub(crate) fn build_session(model_path: &Path) -> Result<Session, InferError> {
@@ -24,6 +109,14 @@ pub(crate) fn build_session_with_threads(
     intra_threads: Option<usize>,
 ) -> Result<Session, InferError> {
     let mut builder = Session::builder()?;
+    #[cfg(feature = "directml")]
+    {
+        builder = builder
+            .with_memory_pattern(false)
+            .map_err(ort::Error::from)?
+            .with_parallel_execution(false)
+            .map_err(ort::Error::from)?;
+    }
     if let Some(threads) = intra_threads {
         builder = builder
             .with_intra_threads(threads)
@@ -92,6 +185,35 @@ fn gpu_providers() -> Vec<ExecutionProviderDispatch> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_policy_only_requests_validated_fp32_provider_families() {
+        let state = text_execution();
+        assert_eq!(
+            state.requested_providers.last(),
+            Some(&"CPUExecutionProvider")
+        );
+        assert_eq!(
+            state.requested_providers.contains(&"CUDAExecutionProvider"),
+            cfg!(feature = "cuda")
+        );
+        assert_eq!(
+            state.requested_providers.contains(&"ROCmExecutionProvider"),
+            cfg!(feature = "rocm")
+        );
+        assert_eq!(
+            state.requested_providers.contains(&"DmlExecutionProvider"),
+            cfg!(feature = "directml")
+        );
+        assert!(!state
+            .requested_providers
+            .contains(&"CoreMLExecutionProvider"));
+        assert!(!state
+            .requested_providers
+            .contains(&"OpenVINOExecutionProvider"));
+        assert_eq!(state.loaded, Some(false));
+        assert!(state.registered_providers.is_none());
+    }
 
     /// The provider list must match the features this build enabled: a `#[cfg]`
     /// that stops matching its feature (a rename, a typo, a feature dropped

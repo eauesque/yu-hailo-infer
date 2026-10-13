@@ -36,6 +36,10 @@ Hailo-10H向けRustネイティブ推論マイクロサービス。HTTP経由で
 
 ## クイックスタート
 
+GPU は既存 Cargo feature `cuda` / `rocm` / `directml` / `coreml` / `openvino` で有効にします。標準 build は CPU です。例: `cargo build --release -p yu-hailo-infer --features cuda`。ROCm / DirectML / OpenVINO は対応 ONNX Runtime の `ORT_DYLIB_PATH` が必要です。EmbeddingGemma 2 は FP32 を保持する CUDA（TF32 無効）/ ROCm / DirectML を使用し、CoreML / OpenVINO の EG2 実行は精度確認まで CPU fallback です。CLIP 等は既存 provider 対応を保持します。
+
+`/healthz` の `text_embed.onnx_execution` は要求と登録 provider を区別します。未読込・推論 lock 中は登録 unknown が返る場合があります。GPU 登録は全 node の GPU 割当を保証しません。GPU 実機の数値 parity と速度は未検証です。
+
 ```bash
 cargo build --release -p yu-hailo-infer
 
