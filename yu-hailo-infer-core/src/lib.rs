@@ -1,13 +1,13 @@
 mod clip;
 pub mod clip_image;
 pub mod clip_text;
-pub mod embeddinggemma2;
 pub mod engine;
 mod ep;
 pub mod error;
 pub mod profile;
 pub mod tags;
 pub mod yolo_labels;
+pub mod yolo_onnx;
 pub mod yolo_postprocess;
 
 pub use clip_image::{is_clip_image_model_downloaded, ClipImageEncoder};

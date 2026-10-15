@@ -10,7 +10,6 @@ pub mod hailort;
 pub mod router;
 pub mod speech2text_route;
 pub mod startup;
-mod text_embed_route;
 
 use clap::Parser;
 use std::collections::HashMap;
@@ -53,6 +52,7 @@ pub async fn run() {
         wd_infer: Arc::new(RwLock::new(HashMap::new())),
         clip_text: Arc::new(RwLock::new(HashMap::new())),
         clip_image: Arc::new(RwLock::new(HashMap::new())),
+        yolo_onnx: Arc::new(RwLock::new(HashMap::new())),
     };
     let app = router::build_router(state);
 

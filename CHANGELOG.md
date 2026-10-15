@@ -7,31 +7,11 @@
 
 ---
 
-## [0.6.1] - 2026-10-14
-
-### Fixed
-
-- EmbeddingGemma 2 の Rust 推論で `sentence_embedding` のみ取得し、未使用の `last_hidden_state` 出力取得を除く。FP32・provider 選択・256 次元正規化を維持する。内部 transformer 計算の削減や GPU 速度向上は保証しない。
-- 実 ONNX Runtime の二出力 fixture で本番 encode 経路と全出力取得時の一致を検証する。
-
-## [0.6.0] - 2026-10-13
+## [0.5.0] - 2026-10-15
 
 ### Added
 
-- EmbeddingGemma 2 の CUDA / ROCm / DirectML 優先 FP32 session と CPU fallback を追加。CUDA TF32 を無効化し、DirectML の sequential / memory pattern 制約を適用する。EG2 の CoreML / OpenVINO は精度確認まで CPU fallback、既存 CLIP 等の provider 対応を保持する。
-- `/healthz` の `text_embed.onnx_execution` に要求 provider・登録 provider・loaded 状態を追加。読込前は登録 unknown、推論中の lock 待ちを避ける。登録は全演算の GPU 実行を保証しない。
-- 固定 FP32 artifact の CPU parity と provider feature compile を検証。GPU 実機の数値一致・速度は未検証。
-
-## [0.5.0] - 2026-10-12
-
-### Added
-
-- 読込は検証時に複製した非公開 snapshot のみから行い、セッション終了まで保持する。元の path が検証後に変更されても未検証の内容を読み込まない。下載済み模型に加えて約1.04 GiBの一時ディスク領域を必要とする。公開 parity fixture に生成元・SHA-256 provenance を添付した。
-- 固定模型カードは [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) を宣言する。Google の[ライセンス案内](https://ai.google.dev/gemma/apache_2)と[責任ある利用の案内](https://ai.google.dev/responsible)を参照できる。
-- 明示選択の実験的 host 推論 `POST /v1/infer/text-embed` を追加。既存 Bearer 認証と `data` 応答形式を使用する。
-- EmbeddingGemma 2 固定 revision `daa72c51243991dfcaf9f9137d2c573d8f7790c0` の FP32 のみ使用。`text`、任意 `title`、`task` (`query` 既定 / `document`)、`dim` (256 のみ)、任意の絶対 `model_dir` を受け付ける。接頭辞はサーバが付与し、8192 token 上限、768→256 切り出し後 L2 正規化を行う。
-- 模型 root は `tokenizer.json` と `onnx/model.onnx`・`onnx/model.onnx_data` を持つ。既定 root は `~/.cache/yu_ai_manager/embeddinggemma2/<revision>/`。読込時にサイズ・SHA-256 を検証し、変更時は再検証する。下載は呼出元が担う。
-- 応答 `data` は `vector`, `dim`, `model`, `revision`, `precision`, `preprocessing` を含む。本文と題名は合計16 KiBまで。同時実行1件・待機4件を上限とし、超過は503。Pi 5 検証は未実施。
+- YOLO ONNX 検出 `/v1/infer/yolo/detect-onnx` を追加。共有実行プロバイダ選択と CPU フォールバック、モデル常駐、Hailo と共通の NMS・座標変換に対応。
 
 ## [0.4.1] - 2026-09-18
 

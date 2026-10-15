@@ -320,6 +320,7 @@ mod tests {
             wd_infer: Arc::new(RwLock::new(HashMap::new())),
             clip_text: Arc::new(RwLock::new(HashMap::new())),
             clip_image: Arc::new(RwLock::new(HashMap::new())),
+            yolo_onnx: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 

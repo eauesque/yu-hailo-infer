@@ -111,18 +111,13 @@ pub struct AppState {
     pub clip_model_dir: PathBuf,
     pub wd_infer: Arc<RwLock<HashMap<String, Arc<infer_core::WdInferEngine>>>>,
     pub clip_text: Arc<RwLock<HashMap<String, Arc<infer_core::ClipTextEncoder>>>>,
+    pub yolo_onnx: Arc<RwLock<HashMap<String, Arc<infer_core::yolo_onnx::YoloOnnxDetector>>>>,
     pub clip_image: Arc<RwLock<HashMap<String, Arc<infer_core::ClipImageEncoder>>>>,
 }
 
 pub fn build_router(state: AppState) -> Router {
-    let text_cache = Arc::new(std::sync::Mutex::new(
-        infer_core::embeddinggemma2::EmbeddingGemma2Cache::default(),
-    ));
     Router::new()
-        .route(
-            "/healthz",
-            get(healthz).layer(axum::Extension(text_cache.clone())),
-        )
+        .route("/healthz", get(healthz))
         .route("/_internal/scan-roots-changed", post(scan_roots_changed))
         .route("/v1/infer/wd", post(infer_wd))
         .route("/v1/infer/yolo/metadata", get(yolo_metadata))
@@ -145,11 +140,13 @@ pub fn build_router(state: AppState) -> Router {
                 MAX_FRAME_BASE64_BYTES + 4096,
             )),
         )
-        .route("/v1/infer/clip-text", post(clip_text))
         .route(
-            "/v1/infer/text-embed",
-            post(crate::text_embed_route::text_embed).layer(axum::Extension(text_cache)),
+            "/v1/infer/yolo/detect-onnx",
+            post(yolo_detect_onnx).layer(axum::extract::DefaultBodyLimit::max(
+                MAX_FRAME_BASE64_BYTES + 4096,
+            )),
         )
+        .route("/v1/infer/clip-text", post(clip_text))
         .route("/v1/infer/speech2text/tokenize", post(speech2text_tokenize))
         .route(
             "/v1/infer/speech2text/transcribe",
@@ -170,22 +167,12 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn healthz(
-    State(state): State<AppState>,
-    axum::Extension(cache): axum::Extension<
-        Arc<std::sync::Mutex<infer_core::embeddinggemma2::EmbeddingGemma2Cache>>,
-    >,
-) -> Json<serde_json::Value> {
-    let execution = match cache.try_lock() {
-        Ok(cache) => cache.execution(),
-        Err(_) => infer_core::embeddinggemma2::EmbeddingGemma2Cache::busy_execution(),
-    };
+async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({
         "ok": true,
         "uptime_secs": state.started_at.elapsed().as_secs(),
         "instance_id": state.instance_id,
         "clip_image_onnx": infer_core::is_clip_image_model_downloaded(&state.clip_model_dir),
-        "text_embed": {"model": infer_core::embeddinggemma2::MODEL, "revision": infer_core::embeddinggemma2::REVISION, "precision": "fp32", "dim": 256, "verification": "at_load", "onnx_execution": execution},
         // HailoRT headers were absent at build time, so this binary links the
         // stub shim instead of real hardware. Callers (e.g. yu-server) use
         // this to distinguish a live device from a sidecar-only deployment.
@@ -278,6 +265,13 @@ pub struct YoloDetectRequest {
     scale: Option<f64>,
     pad_x: Option<f64>,
     pad_y: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct YoloOnnxRequest {
+    model_path: String,
+    #[serde(flatten)]
+    options: YoloDetectRequest,
 }
 
 #[derive(Debug, Deserialize)]
@@ -958,6 +952,107 @@ async fn yolo_smoke_zero(
             })).collect::<Vec<_>>(),
         })),
         Err(error) => hailort_api_error(error, "hailort_yolo_smoke_failed"),
+    }
+}
+
+async fn yolo_detect_onnx(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<YoloOnnxRequest>,
+) -> Response {
+    if let Some(response) = auth_error(&state, &headers) {
+        return response;
+    }
+    use base64::Engine as _;
+    let options = body.options;
+    if options.input_base64.len() > MAX_FRAME_BASE64_BYTES {
+        return api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "yolo_onnx_input_too_large",
+            "input_base64 exceeds limit".into(),
+        );
+    }
+    if !body.model_path.to_ascii_lowercase().ends_with(".onnx") {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "yolo_onnx_invalid_model_path",
+            "model_path must end with .onnx".into(),
+        );
+    }
+    let input = match base64::engine::general_purpose::STANDARD.decode(&options.input_base64) {
+        Ok(input) => input,
+        Err(error) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "yolo_onnx_invalid_base64",
+                error.to_string(),
+            )
+        }
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let detector = {
+            let mut cache = state.yolo_onnx.write().map_err(|_| {
+                infer_core::InferError::InvalidModelOutput("YOLO cache lock poisoned".into())
+            })?;
+            if let Some(detector) = cache.get(&body.model_path) {
+                detector.clone()
+            } else {
+                let detector = Arc::new(infer_core::yolo_onnx::YoloOnnxDetector::new(
+                    std::path::Path::new(&body.model_path),
+                )?);
+                cache.insert(body.model_path, detector.clone());
+                detector
+            }
+        };
+        let size = detector.input_size();
+        if options.input_size.unwrap_or(640) != size
+            || (size as usize)
+                .checked_mul(size as usize)
+                .and_then(|n| n.checked_mul(3))
+                != Some(input.len())
+        {
+            return Ok(None);
+        }
+        let scale_info = infer_core::yolo_postprocess::ScaleInfo {
+            orig_w: options.orig_w.unwrap_or(size),
+            orig_h: options.orig_h.unwrap_or(size),
+            scale: options.scale.unwrap_or(0.0),
+            pad_x: options.pad_x.unwrap_or(0.0),
+            pad_y: options.pad_y.unwrap_or(0.0),
+        };
+        detector
+            .detect(
+                &input,
+                options.conf_threshold.unwrap_or(0.25),
+                options.iou_threshold.unwrap_or(0.45),
+                options.num_classes.unwrap_or(80),
+                &scale_info,
+            )
+            .map(Some)
+    })
+    .await;
+    match result {
+        Ok(Ok(Some(detections))) => api_ok(json!({"detections": detections})),
+        Ok(Ok(None)) => api_error(
+            StatusCode::BAD_REQUEST,
+            "yolo_onnx_input_size_mismatch",
+            "YOLO input size mismatch".into(),
+        ),
+        Ok(Err(infer_core::InferError::ModelNotDownloaded(path))) => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "yolo_onnx_model_not_downloaded",
+            path.display().to_string(),
+        ),
+        Ok(Err(error)) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "yolo_onnx_inference_failed",
+            error.to_string(),
+        ),
+        Err(error) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "yolo_onnx_task_failed",
+            error.to_string(),
+        ),
     }
 }
 
@@ -1972,6 +2067,7 @@ mod tests {
             wd_infer: Arc::new(RwLock::new(HashMap::new())),
             clip_text: Arc::new(RwLock::new(HashMap::new())),
             clip_image: Arc::new(RwLock::new(HashMap::new())),
+            yolo_onnx: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -2483,17 +2579,6 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["instance_id"], "test-instance");
         assert_eq!(body["clip_image_onnx"], false);
-        assert_eq!(
-            body["text_embed"]["model"],
-            infer_core::embeddinggemma2::MODEL
-        );
-        assert_eq!(
-            body["text_embed"]["revision"],
-            infer_core::embeddinggemma2::REVISION
-        );
-        assert_eq!(body["text_embed"]["verification"], "at_load");
-        assert_eq!(body["text_embed"]["onnx_execution"]["loaded"], false);
-        assert!(body["text_embed"]["onnx_execution"]["registered_providers"].is_null());
         assert_eq!(body["hailo_stub"], cfg!(hailo_stub));
 
         std::fs::write(model_dir.join("vision_model.onnx"), b"model").unwrap();
@@ -2512,21 +2597,6 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["clip_image_onnx"], true);
         std::fs::remove_dir_all(model_dir).unwrap();
-    }
-
-    #[tokio::test]
-    async fn healthz_does_not_wait_for_text_inference_lock() {
-        use futures_util::FutureExt;
-        let cache = Arc::new(std::sync::Mutex::new(
-            infer_core::embeddinggemma2::EmbeddingGemma2Cache::default(),
-        ));
-        let _guard = cache.lock().unwrap();
-        let Json(body) = healthz(State(test_state(vec![])), axum::Extension(cache.clone()))
-            .now_or_never()
-            .expect("health must not wait for the inference lock");
-        assert_eq!(body["ok"], true);
-        assert!(body["text_embed"]["onnx_execution"]["loaded"].is_null());
-        assert!(body["text_embed"]["onnx_execution"]["registered_providers"].is_null());
     }
 
     #[tokio::test]
@@ -2800,6 +2870,98 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    async fn onnx_yolo_request(app: Router, body: Value, auth: bool) -> Response {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v1/infer/yolo/detect-onnx")
+            .header("content-type", "application/json");
+        if auth {
+            request = request.header("authorization", "Bearer test-token");
+        }
+        app.oneshot(request.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn yolo_onnx_validates_requests() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../yu-hailo-infer-core/tests/fixtures/yolo_constant.onnx"
+        );
+        for (body, auth, status, code) in [
+            (
+                json!({"model_path": fixture,"input_base64":"%%%"}),
+                false,
+                StatusCode::UNAUTHORIZED,
+                None,
+            ),
+            (
+                json!({"model_path": fixture,"input_base64":"%%%"}),
+                true,
+                StatusCode::BAD_REQUEST,
+                Some("yolo_onnx_invalid_base64"),
+            ),
+            (
+                json!({"model_path":"bad.hef","input_base64":""}),
+                true,
+                StatusCode::BAD_REQUEST,
+                Some("yolo_onnx_invalid_model_path"),
+            ),
+            (
+                json!({"model_path":"/nonexistent/yolo.onnx","input_base64":""}),
+                true,
+                StatusCode::SERVICE_UNAVAILABLE,
+                Some("yolo_onnx_model_not_downloaded"),
+            ),
+            (
+                json!({"model_path":fixture,"input_base64":""}),
+                true,
+                StatusCode::BAD_REQUEST,
+                Some("yolo_onnx_input_size_mismatch"),
+            ),
+            (
+                json!({"model_path":fixture,"input_base64":"A".repeat(MAX_FRAME_BASE64_BYTES+1)}),
+                true,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Some("yolo_onnx_input_too_large"),
+            ),
+        ] {
+            let response = onnx_yolo_request(build_router(test_state(vec![])), body, auth).await;
+            assert_eq!(response.status(), status);
+            if let Some(code) = code {
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                assert!(std::str::from_utf8(&bytes).unwrap().contains(code));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn yolo_onnx_fixture_success_reuses_cache_and_response_shape() {
+        use base64::Engine as _;
+        let state = test_state(vec![]);
+        let cache = state.yolo_onnx.clone();
+        let app = build_router(state);
+        let body = json!({"model_path":concat!(env!("CARGO_MANIFEST_DIR"), "/../yu-hailo-infer-core/tests/fixtures/yolo_constant.onnx"),
+            "input_base64":base64::engine::general_purpose::STANDARD.encode(vec![114;640*640*3]),
+            "orig_w":1280,"orig_h":640,"scale":0.5,"pad_y":160});
+        for _ in 0..2 {
+            let response = onnx_yolo_request(app.clone(), body.clone(), true).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                value,
+                json!({"ok":true,"error":null,"data":{"detections":[{"class_id":0,"class_name":"person","confidence":0.9,"bbox":[0.25,0.25,0.75,0.75]}]}})
+            );
+        }
+        assert_eq!(cache.read().unwrap().len(), 1);
     }
 
     #[tokio::test]

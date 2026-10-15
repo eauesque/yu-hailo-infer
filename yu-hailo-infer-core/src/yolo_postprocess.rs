@@ -263,6 +263,25 @@ pub fn postprocess_yolo_outputs(
         decode_hailo_yolo_outputs(outputs, num_classes, input_size)
     };
 
+    Ok(finalize_detections(
+        (boxes, scores, class_ids),
+        conf_threshold,
+        iou_threshold,
+        embedded_nms,
+        input_size,
+        scale_info,
+    ))
+}
+
+/// Apply the shared confidence, per-class NMS, and letterbox conversion tail.
+pub fn finalize_detections(
+    (boxes, scores, class_ids): (Vec<[f64; 4]>, Vec<f64>, Vec<u32>),
+    conf_threshold: f64,
+    iou_threshold: f64,
+    embedded_nms: bool,
+    input_size: u32,
+    scale_info: &ScaleInfo,
+) -> Vec<Detection> {
     let mut candidates: Vec<([f64; 4], f64, u32)> = boxes
         .into_iter()
         .zip(scores)
@@ -316,7 +335,40 @@ pub fn postprocess_yolo_outputs(
         })
         .collect();
     detections.sort_by(|left, right| right.confidence.total_cmp(&left.confidence));
-    Ok(detections)
+    detections
+}
+
+/// Decode channel-major Ultralytics output without objectness or sigmoid.
+#[allow(clippy::type_complexity)]
+pub fn decode_ultralytics_output(
+    data: &[f32],
+    channels: usize,
+    anchors: usize,
+    num_classes: usize,
+) -> Result<(Vec<[f64; 4]>, Vec<f64>, Vec<u32>), String> {
+    if num_classes == 0
+        || num_classes.checked_add(4) != Some(channels)
+        || channels.checked_mul(anchors) != Some(data.len())
+    {
+        return Err("invalid Ultralytics output shape".to_string());
+    }
+    let mut boxes = Vec::with_capacity(anchors);
+    let mut scores = Vec::with_capacity(anchors);
+    let mut ids = Vec::with_capacity(anchors);
+    for anchor in 0..anchors {
+        let mut best = 0;
+        for class in 1..num_classes {
+            if data[(4 + class) * anchors + anchor] > data[(4 + best) * anchors + anchor] {
+                best = class;
+            }
+        }
+        boxes.push(xywh_to_xyxy(std::array::from_fn(|c| {
+            data[c * anchors + anchor] as f64
+        })));
+        scores.push(data[(4 + best) * anchors + anchor] as f64);
+        ids.push(best as u32);
+    }
+    Ok((boxes, scores, ids))
 }
 
 pub fn round_to_four(value: f64) -> f64 {
@@ -326,6 +378,61 @@ pub fn round_to_four(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ultralytics_decodes_channel_major_boxes_and_raw_scores() {
+        let data = [
+            10., 20., 30., 20., 30., 40., 4., 6., 8., 8., 10., 12., 0.75, 0.25, 0.5, 0.25, 0.875,
+            0.5,
+        ];
+        let (boxes, scores, ids) = decode_ultralytics_output(&data, 6, 3, 2).unwrap();
+        assert_eq!(
+            boxes,
+            vec![
+                [8., 16., 12., 24.],
+                [17., 25., 23., 35.],
+                [26., 34., 34., 46.]
+            ]
+        );
+        assert_eq!(scores, vec![0.75, 0.875, 0.5]);
+        assert_eq!(ids, vec![0, 1, 0]);
+        assert!(decode_ultralytics_output(&data, 5, 3, 2).is_err());
+        assert!(decode_ultralytics_output(&data[..17], 6, 3, 2).is_err());
+        assert!(decode_ultralytics_output(&[], 4, 0, 0).is_err());
+        assert!(decode_ultralytics_output(&[], usize::MAX, 2, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn ultralytics_tail_filters_and_keeps_overlapping_different_classes() {
+        let data = [
+            320., 320., 320., 320., 320., 320., 320., 320., 320., 320., 320., 320., 160., 160.,
+            160., 160., 0.75, 0.5, 0.25, 0., 0., 0., 0., 0.875,
+        ];
+        let decoded = decode_ultralytics_output(&data, 6, 4, 2).unwrap();
+        let scale = ScaleInfo {
+            orig_w: 1280,
+            orig_h: 640,
+            scale: 0.5,
+            pad_x: 0.,
+            pad_y: 160.,
+        };
+        let detections = finalize_detections(decoded, 0.25, 0.45, false, 640, &scale);
+        assert_eq!(
+            detections
+                .iter()
+                .map(|d| (d.class_id, d.confidence, d.bbox))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, 0.875, [0.25, 0.25, 0.75, 0.75]),
+                (0, 0.75, [0.25, 0.25, 0.75, 0.75])
+            ]
+        );
+        let decoded = decode_ultralytics_output(&[0., 640., 1280., 1280., 0.25], 5, 1, 1).unwrap();
+        let scale = ScaleInfo { scale: 0., ..scale };
+        let detections = finalize_detections(decoded, 0.25, 0.45, false, 640, &scale);
+        assert_eq!(detections[0].bbox, [0., 0., 1., 1.]);
+        assert_eq!(detections[0].confidence, 0.25);
+    }
 
     fn float_output(name: &str, shape: [usize; 3], values: &[f32]) -> YoloOutputBuffer {
         YoloOutputBuffer {
