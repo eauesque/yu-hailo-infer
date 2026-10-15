@@ -7,11 +7,37 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-## [0.5.0] - 2026-10-15
+## [0.7.0] - 2026-10-15
 
 ### Added
 
 - Add YOLO ONNX detection at `/v1/infer/yolo/detect-onnx` with shared execution-provider selection, CPU fallback, cached detectors, and the same NMS and coordinate conversion as Hailo.
+
+## [0.6.1] - 2026-10-14
+
+### Fixed
+
+- Fetch only `sentence_embedding` during Rust EmbeddingGemma 2 inference, excluding the unused `last_hidden_state` output. Preserve FP32, provider selection, and 256-dimensional normalization. This does not promise reduced transformer computation or GPU speedups.
+- Verify the production encode path against all-output retrieval with a two-output fixture running in real ONNX Runtime.
+
+## [0.6.0] - 2026-10-13
+
+### Added
+
+- FP32 CUDA/ROCm/DirectML sessions and CPU fallback for EmbeddingGemma 2, with CUDA TF32 disabled and DirectML session constraints. EG2 CoreML/OpenVINO remain on CPU until precision is verified; existing CLIP provider support is preserved.
+- Requested/registered providers and loaded state in `/healthz` under `text_embed.onnx_execution`, without waiting on an active inference lock. Registration does not prove every node executes on GPU.
+- Fixed-artifact CPU parity and GPU feature compilation checks. Hardware GPU parity and throughput remain unverified.
+
+## [0.5.0] - 2026-10-12
+
+### Added
+
+- Model loading uses a private verified snapshot retained for the session lifetime, preventing mutable source paths from changing loaded bytes after hashing. This requires approximately 1.04 GiB of temporary disk space in addition to the downloaded model. Checked-in public parity fixtures include producer metadata and SHA-256 provenance.
+- The pinned model card declares [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0); Google's [Gemma Apache 2.0 guidance](https://ai.google.dev/gemma/apache_2) and [responsible-use guidance](https://ai.google.dev/responsible) describe model licensing and usage considerations.
+- Experimental opt-in host inference at `POST /v1/infer/text-embed`, using existing Bearer authentication and the `data` response envelope.
+- Fixed FP32 EmbeddingGemma 2 revision `daa72c51243991dfcaf9f9137d2c573d8f7790c0`. Accepts raw `text`, optional `title`, `task` (`query` by default or `document`), `dim` (256 only), and optional absolute `model_dir`. The server adds search prefixes, truncates to 8192 tokens, and L2 normalizes after slicing 768 dimensions to 256.
+- Model root contains `tokenizer.json`, `onnx/model.onnx`, and `onnx/model.onnx_data`; default root is `~/.cache/yu_ai_manager/embeddinggemma2/<revision>/`. Size/SHA-256 validation runs on load and reload after artifact changes. Callers handle downloads.
+- Response `data` includes `vector`, `dim`, `model`, `revision`, `precision`, and `preprocessing`. Combined text/title limit is 16 KiB. One active request and four FIFO waiters bound resource use; overflow returns 503. Raspberry Pi 5 validation remains pending.
 
 ## [0.4.1] - 2026-09-18
 
