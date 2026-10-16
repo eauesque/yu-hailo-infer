@@ -43,6 +43,8 @@ fn model_dir(requested: Option<PathBuf>) -> Result<PathBuf, &'static str> {
         .join(eg2::REVISION))
 }
 
+const DEADLINE: std::time::Duration = std::time::Duration::from_secs(170);
+
 fn execution_slots() -> &'static Arc<tokio::sync::Semaphore> {
     static SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
     SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
@@ -109,20 +111,39 @@ pub(crate) async fn text_embed(
             )
         }
     };
-    let execution = execution_slots()
-        .clone()
-        .acquire_owned()
-        .await
-        .expect("semaphore never closed");
-    let result = tokio::task::spawn_blocking(move || {
-        // Permits remain held even if the HTTP request is cancelled.
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    let execution =
+        match tokio::time::timeout_at(deadline, execution_slots().clone().acquire_owned()).await {
+            Ok(permit) => permit.expect("semaphore never closed"),
+            Err(_) => {
+                return api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "text_embed_busy",
+                    "text embedding capacity is exhausted".into(),
+                )
+            }
+        };
+    let task = tokio::task::spawn_blocking(move || {
+        // Response deadline, not cancellation: even a wedged ORT run retains both permits and the slot.
         let (_admission, _execution) = (admission, execution);
-        let mut cache = cache.lock().map_err(|_| {
-            infer_core::InferError::InvalidModelOutput("text embedding cache lock poisoned".into())
-        })?;
+        let mut cache = cache.lock().unwrap_or_else(|poisoned| {
+            let mut guard = poisoned.into_inner();
+            *guard = EmbeddingGemma2Cache::default();
+            cache.clear_poison();
+            guard
+        });
         cache.encode(&dir, &body.text, body.title.as_deref(), body.task)
-    })
-    .await;
+    });
+    let result = match tokio::time::timeout_at(deadline, task).await {
+        Ok(result) => result,
+        Err(_) => {
+            return api_error(
+                StatusCode::GATEWAY_TIMEOUT,
+                "text_embed_timeout",
+                "text embedding timed out".into(),
+            )
+        }
+    };
     match result {
         Ok(Ok(vector)) => api_ok(
             json!({"vector": vector, "dim": eg2::DIM, "model": eg2::MODEL, "revision": eg2::REVISION, "precision": "fp32", "preprocessing": eg2::PREPROCESSING}),
@@ -132,16 +153,22 @@ pub(crate) async fn text_embed(
             "text_embed_model_not_downloaded",
             "EmbeddingGemma 2 FP32 model is not downloaded".into(),
         ),
-        Ok(Err(error)) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "text_embed_inference_failed",
-            error.to_string(),
-        ),
-        Err(error) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "text_embed_task_failed",
-            error.to_string(),
-        ),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "text embedding failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "text_embed_inference_failed",
+                "text embedding failed".into(),
+            )
+        }
+        Err(error) => {
+            tracing::warn!(%error, "text embedding task failed");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "text_embed_task_failed",
+                "text embedding task failed".into(),
+            )
+        }
     }
 }
 
@@ -155,8 +182,8 @@ mod tests {
 
     static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    async fn request(value: serde_json::Value, token: Option<&str>) -> Response {
-        let state = AppState {
+    fn test_state() -> AppState {
+        AppState {
             started_at: std::time::Instant::now(),
             instance_id: "test".into(),
             scan_roots: Arc::new(RwLock::new(ScanRoots {
@@ -170,7 +197,11 @@ mod tests {
             clip_text: Arc::new(RwLock::new(HashMap::new())),
             clip_image: Arc::new(RwLock::new(HashMap::new())),
             yolo_onnx: Arc::new(RwLock::new(HashMap::new())),
-        };
+        }
+    }
+
+    async fn request(value: serde_json::Value, token: Option<&str>) -> Response {
+        let state = test_state();
         let mut builder = Request::builder()
             .method("POST")
             .uri("/v1/infer/text-embed")
@@ -182,6 +213,137 @@ mod tests {
             .oneshot(builder.body(Body::from(value.to_string())).unwrap())
             .await
             .unwrap()
+    }
+
+    fn direct_request(
+        cache: Arc<Mutex<EmbeddingGemma2Cache>>,
+    ) -> impl std::future::Future<Output = Response> {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer test-token".parse().unwrap());
+        text_embed(
+            State(test_state()),
+            Extension(cache),
+            headers,
+            Json(
+                serde_json::from_value(json!({"text":"cat", "model_dir":"/nonexistent-eg2-test"}))
+                    .unwrap(),
+            ),
+        )
+    }
+
+    async fn response_body(response: Response) -> serde_json::Value {
+        serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    // A real clock guard keeps timeout sentinels finite even with Tokio time paused.
+    async fn real_guard<T>(future: impl std::future::Future<Output = T>) -> T {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let _ = tx.send(());
+        });
+        tokio::select! {
+            value = future => value,
+            _ = rx => panic!("real-time guard expired"),
+        }
+    }
+
+    #[tokio::test]
+    async fn poisoned_cache_recovers_and_clears_poison() {
+        let _serial = TEST_SERIAL.lock().await;
+        let cache = Arc::new(Mutex::new(EmbeddingGemma2Cache::default()));
+        let other = cache.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = other.lock().unwrap();
+            panic!("poison fixture");
+        })
+        .join()
+        .is_err());
+        let response = direct_request(cache.clone()).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response_body(response).await["error"],
+            "text_embed_model_not_downloaded"
+        );
+        assert!(!cache.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn queue_deadline_releases_admission() {
+        let _serial = TEST_SERIAL.lock().await;
+        let execution = execution_slots().clone().acquire_owned().await.unwrap();
+        tokio::time::pause();
+        let task = tokio::spawn(direct_request(Arc::new(Mutex::new(
+            EmbeddingGemma2Cache::default(),
+        ))));
+        while admission_slots().available_permits() != 4 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(DEADLINE + std::time::Duration::from_secs(1)).await;
+        let response = real_guard(task).await.unwrap();
+        drop(execution);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response_body(response).await["error"], "text_embed_busy");
+        assert_eq!(admission_slots().available_permits(), 5);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // Deliberately block cache.lock() to test the response deadline.
+    async fn run_deadline_retains_permits_until_blocking_task_finishes() {
+        let _serial = TEST_SERIAL.lock().await;
+        let cache = Arc::new(Mutex::new(EmbeddingGemma2Cache::default()));
+        let guard = cache.lock().unwrap();
+        tokio::time::pause();
+        let task = tokio::spawn(direct_request(cache.clone()));
+        while execution_slots().available_permits() != 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(DEADLINE + std::time::Duration::from_secs(1)).await;
+        // Release the std lock even when the sentinel guard expires.
+        let outcome = std::panic::AssertUnwindSafe(real_guard(task));
+        use futures_util::FutureExt;
+        let outcome = outcome.catch_unwind().await;
+        let held = (
+            admission_slots().available_permits(),
+            execution_slots().available_permits(),
+        );
+        drop(guard);
+        real_guard(async {
+            while admission_slots().available_permits() != 5
+                || execution_slots().available_permits() != 1
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let response = outcome.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(response_body(response).await["error"], "text_embed_timeout");
+        assert_eq!(held, (4, 0));
+    }
+
+    #[tokio::test]
+    async fn inference_error_body_hides_artifact_and_path() {
+        let _serial = TEST_SERIAL.lock().await;
+        let dir = std::env::temp_dir().join(format!("eg2-error-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("onnx")).unwrap();
+        std::fs::write(dir.join("onnx/model.onnx"), b"bad").unwrap();
+        let response = request(
+            json!({"text":"cat", "model_dir":dir}),
+            Some("Bearer test-token"),
+        )
+        .await;
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response_body(response).await;
+        assert_eq!(body["message"], "text embedding failed");
+        assert!(!body.to_string().contains("model.onnx"));
+        assert!(!body.to_string().contains(dir.to_str().unwrap()));
     }
 
     #[tokio::test]

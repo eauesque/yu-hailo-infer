@@ -7,6 +7,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.7.1] - 2026-10-16
+
+### Fixed
+
+- Reject symlinked EG2 snapshot `.verified` roots to prevent creation and cleanup in the symlink target.
+- Store verified EG2 snapshots in the fixed `<model_dir>/../.verified` location matching the Python host, instead of system TMPDIR. Private `yu-eg2-infer-*` directories use mode 0700; sweep only real sidecar directories older than six hours, preserving Python snapshots and symlinks.
+- Recover poisoned text embedding caches and report unloaded state in healthz. Apply one 170-second response deadline from admission: queue expiry returns 503 busy, execution expiry returns 504 timeout. This does not cancel blocking inference; both permits remain held until it finishes, including a wedged ORT run.
+- Return fixed text embedding 500 messages and log internal errors. This is a partial disclosure fix: authenticated callers can still distinguish missing models (503) from invalid artifacts (500).
+- Known limits: age-based cleanup can remove another sidecar's snapshot after six hours; crash loops leak about 1.08 GB per snapshot until then. Linux live mappings survive unlink; Windows deletion failures are logged and skipped. Touch/chmod still trigger reloads. Raspberry Pi 5 cold-load time remains unmeasured.
+
 ## [0.7.0] - 2026-10-15
 
 ### Added

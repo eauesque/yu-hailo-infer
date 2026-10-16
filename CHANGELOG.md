@@ -7,6 +7,16 @@
 
 ---
 
+## [0.7.1] - 2026-10-16
+
+### Fixed
+
+- EG2 snapshot の `.verified` root が symlink の場合は拒否し、リンク先への作成・掃除を防ぐ。
+- EG2 検証済み snapshot をシステム TMPDIR から Python host と同じ固定位置 `<model_dir>/../.verified` に移動。非公開 `yu-eg2-infer-*` は0700で作成し、6時間超の実ディレクトリのみ掃除する。Python snapshot・symlink は保持する。
+- text embedding cache の poison を回復し、healthz は未読込状態を返す。admission から単一170秒の応答期限を適用し、待機期限切れは503 busy、実行期限切れは504 timeout。blocking 推論はキャンセルせず、停止した ORT を含め終了まで両 permit を保持する。
+- text embedding の500本文を固定し、内部エラーはログに記録。部分的な情報開示対策であり、認証済み呼出元による模型未配置503と不正 artifact 500の存在判別は残る。
+- 既知の制約: 経過時間による掃除は別 sidecar の6時間超の snapshot も対象とする。6時間以内の crash loop は1回あたり約1.08 GBを残す。Linux の使用中 mapping は unlink 後も有効、Windows の削除失敗はログ記録してスキップする。touch/chmod による再読込は残る。Pi 5 cold-load 時間は未計測。
+
 ## [0.7.0] - 2026-10-15
 
 ### Added

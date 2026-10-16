@@ -185,7 +185,12 @@ async fn healthz(
 ) -> Json<serde_json::Value> {
     let execution = match cache.try_lock() {
         Ok(cache) => cache.execution(),
-        Err(_) => infer_core::embeddinggemma2::EmbeddingGemma2Cache::busy_execution(),
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            infer_core::embeddinggemma2::EmbeddingGemma2Cache::default().execution()
+        }
+        Err(std::sync::TryLockError::WouldBlock) => {
+            infer_core::embeddinggemma2::EmbeddingGemma2Cache::busy_execution()
+        }
     };
     Json(json!({
         "ok": true,
@@ -2628,6 +2633,23 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["clip_image_onnx"], true);
         std::fs::remove_dir_all(model_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn healthz_reports_unloaded_for_poisoned_cache_without_recovery() {
+        let cache = Arc::new(std::sync::Mutex::new(
+            infer_core::embeddinggemma2::EmbeddingGemma2Cache::default(),
+        ));
+        let other = cache.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = other.lock().unwrap();
+            panic!("poison fixture");
+        })
+        .join()
+        .is_err());
+        let Json(body) = healthz(State(test_state(vec![])), axum::Extension(cache.clone())).await;
+        assert_eq!(body["text_embed"]["onnx_execution"]["loaded"], false);
+        assert!(cache.is_poisoned());
     }
 
     #[tokio::test]

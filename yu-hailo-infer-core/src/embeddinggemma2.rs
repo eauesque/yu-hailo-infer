@@ -157,15 +157,75 @@ fn copy_verified_artifact(
     Ok(())
 }
 
-fn snapshot_artifacts(dir: &Path) -> Result<tempfile::TempDir, InferError> {
+const SNAPSHOT_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
+fn sweep_stale(root: &Path, now: SystemTime) {
+    // shortcut: age-based sweep; crash loops leak 1.08 GB each for 6 h; use per-snapshot locks for multiple sidecars.
+    // Swapped-entry safety relies on std::fs::remove_dir_all not following trailing symlinks (Rust >= 1.58; MSRV 1.88).
+    // Linux unlink of live mappings is harmless; Windows deletion failures are skipped.
+    let sweep = || -> std::io::Result<()> {
+        for entry in fs::read_dir(root)? {
+            let result = || -> std::io::Result<()> {
+                let entry = entry?;
+                if !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("yu-eg2-infer-")
+                {
+                    return Ok(());
+                }
+                let path = entry.path();
+                let meta = fs::symlink_metadata(&path)?;
+                if meta.is_dir() {
+                    let age = now.duration_since(meta.modified()?).unwrap_or_default();
+                    if age > SNAPSHOT_MAX_AGE {
+                        fs::remove_dir_all(&path)?;
+                        tracing::info!(?path, ?age, "removed stale EG2 snapshot");
+                    }
+                }
+                Ok(())
+            };
+            if let Err(error) = result() {
+                tracing::warn!(%error, ?root, "EG2 snapshot cleanup failed");
+            }
+        }
+        Ok(())
+    };
+    if let Err(error) = sweep() {
+        tracing::warn!(%error, ?root, "EG2 snapshot sweep failed");
+    }
+}
+
+fn new_snapshot_dir(model_dir: &Path, now: SystemTime) -> Result<tempfile::TempDir, InferError> {
+    let parent = model_dir
+        .parent()
+        .ok_or_else(|| invalid("model_dir has no parent"))?;
+    let root = parent.join(".verified");
+    let mut dirs = fs::DirBuilder::new();
+    dirs.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        dirs.mode(0o700);
+    }
+    dirs.create(&root)?;
+    let meta = fs::symlink_metadata(&root)?;
+    if meta.is_symlink() || !meta.is_dir() {
+        return Err(invalid("snapshot root is not a real directory"));
+    }
+    sweep_stale(&root, now);
     let mut builder = tempfile::Builder::new();
-    builder.prefix("yu-eg2-");
+    builder.prefix("yu-eg2-infer-");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         builder.permissions(fs::Permissions::from_mode(0o700));
     }
-    let snapshot = builder.tempdir()?;
+    Ok(builder.tempdir_in(root)?)
+}
+
+fn snapshot_artifacts(dir: &Path) -> Result<tempfile::TempDir, InferError> {
+    let snapshot = new_snapshot_dir(dir, SystemTime::now())?;
     fs::create_dir(snapshot.path().join("onnx"))?;
     for (name, size, expected) in ARTIFACTS {
         copy_verified_artifact(&dir.join(name), &snapshot.path().join(name), size, expected)?;
@@ -355,6 +415,80 @@ fn normalize(shape: &[i64], values: &[f32]) -> Result<Vec<f32>, InferError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_location_prefix_and_private_permissions() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".verified");
+        let snapshot = new_snapshot_dir(&temp.path().join("model"), SystemTime::now()).unwrap();
+        assert_eq!(snapshot.path().parent(), Some(root.as_path()));
+        assert!(snapshot
+            .path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("yu-eg2-infer-"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [&root, snapshot.path()] {
+                assert_eq!(
+                    fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+            }
+            for mode in [0o750, 0o755] {
+                fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
+                let _second =
+                    new_snapshot_dir(&temp.path().join("model"), SystemTime::now()).unwrap();
+                assert_eq!(
+                    fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+                    mode
+                );
+            }
+        }
+        assert!(new_snapshot_dir(Path::new("/"), SystemTime::now()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_rejects_symlinked_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(target.path(), temp.path().join(".verified")).unwrap();
+        let result = new_snapshot_dir(&temp.path().join("model"), SystemTime::now());
+        assert!(result.is_err());
+        assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn sweep_removes_only_stale_infer_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let stale = root.join("yu-eg2-infer-stale");
+        let python = root.join("yu-eg2-verified-python");
+        let file = root.join("yu-eg2-infer-file");
+        fs::create_dir(&stale).unwrap();
+        fs::create_dir(&python).unwrap();
+        fs::write(&file, b"keep").unwrap();
+        #[cfg(unix)]
+        let outside = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), root.join("yu-eg2-infer-link")).unwrap();
+        let now = SystemTime::now();
+        sweep_stale(root, now);
+        assert!(stale.is_dir());
+        sweep_stale(root, now + std::time::Duration::from_secs(7 * 60 * 60));
+        assert!(!stale.exists());
+        assert!(python.is_dir());
+        assert!(file.is_file());
+        #[cfg(unix)]
+        {
+            assert!(root.join("yu-eg2-infer-link").is_symlink());
+            assert!(outside.path().is_dir());
+        }
+    }
 
     #[test]
     fn encoder_fetches_only_sentence_and_matches_all_outputs() {
@@ -561,28 +695,33 @@ mod tests {
 
     #[test]
     fn rejects_missing_wrong_size_and_wrong_hash_artifacts() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir(dir.path().join("onnx")).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("model");
+        fs::create_dir_all(dir.join("onnx")).unwrap();
         assert!(matches!(
-            Identity::read(dir.path()),
+            Identity::read(&dir),
             Err(InferError::ModelNotDownloaded(_))
         ));
-        fs::write(dir.path().join("onnx/model.onnx"), b"bad").unwrap();
-        assert!(Identity::read(dir.path()).is_err());
+        fs::write(dir.join("onnx/model.onnx"), b"bad").unwrap();
+        assert!(Identity::read(&dir).is_err());
         for (name, size, _) in ARTIFACTS {
-            fs::File::create(dir.path().join(name))
+            fs::File::create(dir.join(name))
                 .unwrap()
                 .set_len(size)
                 .unwrap();
         }
-        let identity = Identity::read(dir.path()).unwrap();
-        assert!(snapshot_artifacts(dir.path()).is_err());
-        fs::remove_file(dir.path().join("onnx/model.onnx")).unwrap();
-        fs::File::create(dir.path().join("onnx/model.onnx"))
+        let identity = Identity::read(&dir).unwrap();
+        assert!(snapshot_artifacts(&dir).is_err());
+        assert_eq!(
+            fs::read_dir(temp.path().join(".verified")).unwrap().count(),
+            0
+        );
+        fs::remove_file(dir.join("onnx/model.onnx")).unwrap();
+        fs::File::create(dir.join("onnx/model.onnx"))
             .unwrap()
             .set_len(ARTIFACTS[0].1)
             .unwrap();
-        assert_ne!(identity, Identity::read(dir.path()).unwrap());
+        assert_ne!(identity, Identity::read(&dir).unwrap());
     }
 
     #[test]
