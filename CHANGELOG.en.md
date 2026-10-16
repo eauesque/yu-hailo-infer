@@ -7,6 +7,17 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.7.2] - 2026-10-16
+
+### Fixed
+
+- Run one EG2 GPU self-check through the production encode path using the first public FP32 parity fixture as a runtime oracle (cosine >= 0.9999). Log passing provider/cosine or fallback provider/reason. Drop a failing GPU session before rebuilding and validating a four-thread CPU session from the verified snapshot.
+- Limits / deferred work: registration does not prove GPU node placement; one input's parity does not cover every request. Failures after a passing probe still return 500. Transient load-time GPU failures (including OOM) pin the encoder to CPU until reload/restart; the reason is available only in logs. ORT CUDA contexts/handles remain alive after fallback; no device reset occurs.
+- Automatic working-device selection is deferred: fallback selects CPU. Owners can pin a device with `CUDA_DEVICE_ORDER=PCI_BUS_ID` and `CUDA_VISIBLE_DEVICES`. Release `ORT_CUDA_VERSION` selection (cu12 defaults can silently fall back on CUDA-13-only hosts) and a newer ORT with sm_120 kernels remain product/upstream decisions.
+- The Python EG2 host has no self-check yet. The supervisor must record the yu_ai_manager TODO at pin adoption; M9 remains open until then. The downstream pin bump must re-adopt the spawn-gate ledger (same shape as yu_ai_manager f7992717a).
+- Hardware test (c) was not run: pending PCI_BUS_ID device-index confirmation, CUDA-13 5060 Ti CPU fallback / 3060 CUDA parity, pass/fallback load times against 170 s, and VRAM after fallback.
+- Validation: fmt, workspace clippy (default / CUDA feature), and workspace tests pass (169 passed, 16 ignored), including three new tests for (a)(b)(d). Both sentinels (remove the load probe call / remove fallback) fail (d) by assertion; the restored code passes the full suite again.
+
 ## [0.7.1] - 2026-10-16
 
 ### Fixed

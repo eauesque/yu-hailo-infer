@@ -17,7 +17,7 @@ use tokenizers::{Tokenizer, TruncationParams};
 
 pub use crate::ep::OnnxExecution;
 use crate::{
-    ep::{build_text_session, text_execution},
+    ep::{build_text_cpu_session, build_text_session, text_execution},
     InferError,
 };
 
@@ -26,6 +26,29 @@ pub const REVISION: &str = "daa72c51243991dfcaf9f9137d2c573d8f7790c0";
 pub const PREPROCESSING: &str = "eg2-search-v1";
 pub const DIM: usize = 256;
 pub const MAX_TEXT_BYTES: usize = 16 * 1024;
+
+// Public provenance-checked FP32 fixture is also the runtime GPU oracle.
+const PARITY: &str = include_str!("../tests/fixtures/embeddinggemma2_fp32_parity.json");
+
+fn parity_cosine(actual: &[f32], expected: &[f32]) -> Result<f64, &'static str> {
+    if actual.len() != DIM
+        || expected.len() != DIM
+        || actual.iter().chain(expected).any(|v| !v.is_finite())
+    {
+        return Err("parity vectors must have 256 finite values");
+    }
+    let norm = |v: &[f32]| v.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>().sqrt();
+    let (actual_norm, expected_norm) = (norm(actual), norm(expected));
+    if (expected_norm - 1.0).abs() > 1e-5 || (actual_norm - 1.0).abs() > 1e-5 {
+        return Err("parity vectors must have unit norm");
+    }
+    Ok(actual
+        .iter()
+        .zip(expected)
+        .map(|(&a, &b)| f64::from(a) * f64::from(b))
+        .sum::<f64>()
+        / (actual_norm * expected_norm))
+}
 
 const ARTIFACTS: [(&str, u64, &str); 3] = [
     (
@@ -293,6 +316,13 @@ struct Encoder {
 
 impl Encoder {
     fn load(snapshot: tempfile::TempDir) -> Result<Self, InferError> {
+        Self::load_with(snapshot, build_text_session)
+    }
+
+    fn load_with(
+        snapshot: tempfile::TempDir,
+        build: impl FnOnce(&Path) -> Result<(Session, OnnxExecution), InferError>,
+    ) -> Result<Self, InferError> {
         let dir = snapshot.path();
         let mut tokenizer = Tokenizer::from_file(dir.join("tokenizer.json"))
             .map_err(|e| InferError::Tokenizer(e.to_string()))?;
@@ -304,8 +334,17 @@ impl Encoder {
             }))
             .map_err(|e| InferError::Tokenizer(e.to_string()))?;
         // Match the four CPU threads used by the host adoption benchmark.
-        let (session, execution) = build_text_session(&dir.join("onnx/model.onnx"))?;
+        let model_path = dir.join("onnx/model.onnx");
+        let (session, mut execution) = build(&model_path)?;
         validate_contract(&session)?;
+        let (session, registered) = probe_or_fallback(
+            session,
+            &tokenizer,
+            &model_path,
+            execution.registered_providers.take(),
+            &probe_fixture().map(|row| row.vector),
+        )?;
+        execution.registered_providers = registered;
         Ok(Self {
             session,
             execution,
@@ -315,48 +354,117 @@ impl Encoder {
     }
 
     fn encode(&mut self, text: &str) -> Result<Vec<f32>, InferError> {
-        let encoding = self
-            .tokenizer
-            .encode(text, true)
-            .map_err(|e| InferError::Tokenizer(e.to_string()))?;
-        let input_ids = Array2::from_shape_vec(
-            (1, encoding.len()),
-            encoding.get_ids().iter().map(|&v| i64::from(v)).collect(),
-        )
-        .map_err(|e| invalid(e.to_string()))?;
-        let attention_mask = Array2::from_shape_vec(
-            (1, encoding.len()),
-            encoding
-                .get_attention_mask()
-                .iter()
-                .map(|&v| i64::from(v))
-                .collect(),
-        )
-        .map_err(|e| invalid(e.to_string()))?;
-        let options = RunOptions::new()?
-            .with_outputs(OutputSelector::no_default().with("sentence_embedding"));
-        let outputs = self.session.run_with_options(
-            ort::inputs![
-                "input_ids" => Value::from_array(input_ids)?,
-                "attention_mask" => Value::from_array(attention_mask)?,
-                "image_features" => Value::from_array(Array2::<f32>::zeros((0, 512)))?,
-                "video_features" => Value::from_array(Array2::<f32>::zeros((0, 512)))?,
-                "audio_features" => Value::from_array(Array2::<f32>::zeros((0, 512)))?,
-            ],
-            &options,
-        )?;
-        #[cfg(test)]
-        assert_eq!(
-            outputs.len(),
-            1,
-            "only sentence_embedding should be fetched"
-        );
-        let output = outputs
-            .get("sentence_embedding")
-            .ok_or_else(|| invalid("missing sentence_embedding"))?;
-        let (shape, values) = output.try_extract_tensor::<f32>()?;
-        normalize(shape, values)
+        encode(&mut self.session, &self.tokenizer, text)
     }
+}
+
+fn encode(
+    session: &mut Session,
+    tokenizer: &Tokenizer,
+    text: &str,
+) -> Result<Vec<f32>, InferError> {
+    let encoding = tokenizer
+        .encode(text, true)
+        .map_err(|e| InferError::Tokenizer(e.to_string()))?;
+    let input_ids = Array2::from_shape_vec(
+        (1, encoding.len()),
+        encoding.get_ids().iter().map(|&v| i64::from(v)).collect(),
+    )
+    .map_err(|e| invalid(e.to_string()))?;
+    let attention_mask = Array2::from_shape_vec(
+        (1, encoding.len()),
+        encoding
+            .get_attention_mask()
+            .iter()
+            .map(|&v| i64::from(v))
+            .collect(),
+    )
+    .map_err(|e| invalid(e.to_string()))?;
+    let options =
+        RunOptions::new()?.with_outputs(OutputSelector::no_default().with("sentence_embedding"));
+    let outputs = session.run_with_options(
+        ort::inputs![
+            "input_ids" => Value::from_array(input_ids)?,
+            "attention_mask" => Value::from_array(attention_mask)?,
+            "image_features" => Value::from_array(Array2::<f32>::zeros((0, 512)))?,
+            "video_features" => Value::from_array(Array2::<f32>::zeros((0, 512)))?,
+            "audio_features" => Value::from_array(Array2::<f32>::zeros((0, 512)))?,
+        ],
+        &options,
+    )?;
+    #[cfg(test)]
+    assert_eq!(
+        outputs.len(),
+        1,
+        "only sentence_embedding should be fetched"
+    );
+    let output = outputs
+        .get("sentence_embedding")
+        .ok_or_else(|| invalid("missing sentence_embedding"))?;
+    let (shape, values) = output.try_extract_tensor::<f32>()?;
+    normalize(shape, values)
+}
+
+#[derive(serde::Deserialize)]
+struct ProbeFixture {
+    text: String,
+    title: Option<String>,
+    task: TextTask,
+    vector: Vec<f32>,
+}
+
+fn probe_fixture() -> Result<ProbeFixture, InferError> {
+    serde_json::from_str::<Vec<ProbeFixture>>(PARITY)
+        .map_err(|e| invalid(e.to_string()))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| invalid("empty parity fixture"))
+}
+
+fn gpu_probe_verdict(
+    result: Result<Vec<f32>, InferError>,
+    expected: &[f32],
+) -> Result<f64, String> {
+    let actual = result.map_err(|e| e.to_string())?;
+    let cosine = parity_cosine(&actual, expected).map_err(str::to_owned)?;
+    if cosine < 0.9999 {
+        return Err(format!("probe cosine {cosine} < 0.9999"));
+    }
+    Ok(cosine)
+}
+
+fn probe_or_fallback(
+    mut session: Session,
+    tokenizer: &Tokenizer,
+    model_path: &Path,
+    mut registered: Option<Vec<&'static str>>,
+    expected: &Result<Vec<f32>, InferError>,
+) -> Result<(Session, Option<Vec<&'static str>>), InferError> {
+    if registered
+        .as_ref()
+        .is_some_and(|names| names.iter().any(|name| *name != "CPUExecutionProvider"))
+    {
+        let result = (|| {
+            let row = probe_fixture()?;
+            let text = prepare_text(&row.text, row.title.as_deref(), row.task).map_err(invalid)?;
+            encode(&mut session, tokenizer, &text)
+        })();
+        let verdict = match expected {
+            Ok(expected) => gpu_probe_verdict(result, expected),
+            Err(error) => Err(error.to_string()),
+        };
+        match verdict {
+            Ok(cosine) => tracing::info!(providers = ?registered, cosine, "EG2 GPU probe passed"),
+            Err(reason) => {
+                tracing::warn!(providers = ?registered, %reason, "EG2 GPU probe failed; falling back to CPU");
+                drop(session);
+                session = build_text_cpu_session(model_path)?;
+                validate_contract(&session)?;
+                registered = Some(vec!["CPUExecutionProvider"]);
+            }
+        }
+    }
+    Ok((session, registered))
 }
 
 fn tensor_matches(dtype: &ValueType, expected: TensorElementType, dims: &[i64]) -> bool {
@@ -415,6 +523,83 @@ fn normalize(shape: &[i64], values: &[f32]) -> Result<Vec<f32>, InferError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_probe_verdict_checks_errors_dimensions_and_threshold() {
+        let mut expected = vec![0.0; DIM];
+        expected[0] = 1.0;
+        assert!(gpu_probe_verdict(Err(invalid("injected run failure")), &expected).is_err());
+        assert!(gpu_probe_verdict(Ok(vec![1.0]), &expected).is_err());
+        for (cosine, pass) in [(0.99989_f32, false), (0.99991_f32, true)] {
+            let mut actual = vec![0.0; DIM];
+            actual[0] = cosine;
+            actual[1] = (1.0 - cosine * cosine).sqrt();
+            assert_eq!(gpu_probe_verdict(Ok(actual), &expected).is_ok(), pass);
+        }
+    }
+
+    #[test]
+    fn gpu_probe_input_is_literal_query() {
+        let row = probe_fixture().unwrap();
+        assert_eq!(row.text, "桜の花");
+        assert_eq!(row.title, None);
+        assert!(matches!(row.task, TextTask::Query));
+        assert_eq!(
+            prepare_text(&row.text, row.title.as_deref(), row.task).unwrap(),
+            "task: search result | query: 桜の花"
+        );
+    }
+
+    #[test]
+    fn gpu_probe_load_with_falls_back_and_keeps_passing_provider() {
+        let snapshot = tempfile::tempdir().unwrap();
+        fs::create_dir(snapshot.path().join("onnx")).unwrap();
+        let model_path = snapshot.path().join("onnx/model.onnx");
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/eg2_two_outputs.onnx"),
+            &model_path,
+        )
+        .unwrap();
+        let tokenizer = Tokenizer::new(
+            tokenizers::models::wordlevel::WordLevel::builder()
+                .vocab([("fixture".to_owned(), 0)].into_iter().collect())
+                .unk_token("fixture".to_owned())
+                .build()
+                .unwrap(),
+        );
+        tokenizer
+            .save(snapshot.path().join("tokenizer.json"), false)
+            .unwrap();
+        let fake = vec!["InjectedGPUExecutionProvider", "CPUExecutionProvider"];
+        let mut encoder = Encoder::load_with(snapshot, |path| {
+            let mut execution = text_execution();
+            execution.registered_providers = Some(fake.clone());
+            execution.loaded = Some(true);
+            Ok((build_text_cpu_session(path)?, execution))
+        })
+        .unwrap();
+        assert_eq!(
+            encoder.execution.registered_providers,
+            Some(vec!["CPUExecutionProvider"])
+        );
+        validate_contract(&encoder.session).unwrap();
+        let expected = encoder.encode("fixture").unwrap();
+        assert_eq!(expected.len(), DIM);
+        let (mut session, registered) = probe_or_fallback(
+            build_text_cpu_session(&model_path).unwrap(),
+            &encoder.tokenizer,
+            &model_path,
+            Some(fake.clone()),
+            &Ok(expected.clone()),
+        )
+        .unwrap();
+        assert_eq!(registered, Some(fake));
+        validate_contract(&session).unwrap();
+        assert_eq!(
+            encode(&mut session, &encoder.tokenizer, "fixture").unwrap(),
+            expected
+        );
+    }
 
     #[test]
     fn snapshot_location_prefix_and_private_permissions() {
@@ -550,28 +735,6 @@ mod tests {
         assert_eq!(busy.loaded, None);
         assert!(busy.registered_providers.is_none());
         assert_eq!(busy.requested_providers, unloaded.requested_providers);
-    }
-
-    const PARITY: &str = include_str!("../tests/fixtures/embeddinggemma2_fp32_parity.json");
-
-    fn parity_cosine(actual: &[f32], expected: &[f32]) -> Result<f64, &'static str> {
-        if actual.len() != DIM
-            || expected.len() != DIM
-            || actual.iter().chain(expected).any(|v| !v.is_finite())
-        {
-            return Err("parity vectors must have 256 finite values");
-        }
-        let norm = |v: &[f32]| v.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>().sqrt();
-        let (actual_norm, expected_norm) = (norm(actual), norm(expected));
-        if (expected_norm - 1.0).abs() > 1e-5 || (actual_norm - 1.0).abs() > 1e-5 {
-            return Err("parity vectors must have unit norm");
-        }
-        Ok(actual
-            .iter()
-            .zip(expected)
-            .map(|(&a, &b)| f64::from(a) * f64::from(b))
-            .sum::<f64>()
-            / (actual_norm * expected_norm))
     }
 
     #[test]

@@ -82,12 +82,7 @@ pub(crate) fn build_text_session(
                 .any(|name| *name != "CPUExecutionProvider") =>
         {
             tracing::warn!(%error, "Text GPU session load failed; retrying CPU");
-            let mut cpu = Session::builder()?
-                .with_intra_threads(4)
-                .map_err(ort::Error::from)?
-                .with_execution_providers([ort::ep::CPU::default().build().error_on_failure()])
-                .map_err(ort::Error::from)?;
-            let session = cpu.commit_from_file(model_path)?;
+            let session = build_text_cpu_session(model_path)?;
             registered = vec!["CPUExecutionProvider"];
             session
         }
@@ -96,6 +91,15 @@ pub(crate) fn build_text_session(
     execution.registered_providers = Some(registered);
     execution.loaded = Some(true);
     Ok((session, execution))
+}
+
+pub(crate) fn build_text_cpu_session(model_path: &Path) -> Result<Session, InferError> {
+    let mut cpu = Session::builder()?
+        .with_intra_threads(4)
+        .map_err(ort::Error::from)?
+        .with_execution_providers([ort::ep::CPU::default().build().error_on_failure()])
+        .map_err(ort::Error::from)?;
+    Ok(cpu.commit_from_file(model_path)?)
 }
 
 /// Build an ORT session that tries every compiled-in GPU provider in order and

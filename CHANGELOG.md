@@ -7,6 +7,20 @@
 
 ---
 
+## [0.7.2] - 2026-10-16
+
+### Fixed
+
+- EG2 GPU 読込時、本番 encode 経路で公開 FP32 parity fixture の先頭行を runtime oracle として一度検証する（cosine >= 0.9999）。成功時は provider/cosine、fallback 時は provider/理由をログ記録。失敗した GPU session を明示 drop 後、検証済み snapshot から4スレッド CPU session を再構築・契約検証する。
+- 制約・対象外: provider 登録は GPU node 配置の証明ではなく、1入力の parity は全要求を保証しない。probe 成功後の実行失敗は引き続き500。読込時の一時的 GPU 障害（OOM 等）でも再読込・再起動まで CPU 固定となり、理由はログのみ。fallback 後も ORT の CUDA context/handle はプロセス内に残り、device reset は行わない。
+- 動作する CUDA device の自動選択は未実装（CPU に fallback）。所有者は `CUDA_DEVICE_ORDER=PCI_BUS_ID` と `CUDA_VISIBLE_DEVICES` で固定できる。release の `ORT_CUDA_VERSION` 選択（cu12 default は CUDA-13-only host で黙って CPU fallback し得る）と sm_120 kernel 対応新版 ORT は保留。
+- Python EG2 host の self-check は未実装。yu_ai_manager TODO は pin 採用時に supervisor が記録し、それまで M9 は未完了。downstream pin 更新時は spawn-gate ledger を再採用する（yu_ai_manager f7992717a と同形）。
+- 実機テスト(c)を実施（2026-10-16、WSL2、CUDA 13.4、cuDNN 9.27、`ORT_CUDA_VERSION=13`、`CUDA_DEVICE_ORDER=PCI_BUS_ID`）:
+  - index 0 = RTX 3060（sm_86、`05:00.0`）: CUDA のまま parity 通過、最小 cosine 0.99999999999983、試験全体 43.9 秒。
+  - index 1 = RTX 5060 Ti（sm_120、`0A:00.0`）: probe 失敗から CPU へ切替へ、`registered_providers=["CPUExecutionProvider"]`、最小 cosine 0.99999999999979、試験全体 37.4 秒。切替後も CUDA context 分の約 983 MiB が残る。
+  - 両経路とも 170 秒期限に十分収まる（試験全体の時間であり、読込単体の計測ではない）。
+- 検証: fmt、workspace clippy（通常 / CUDA feature）、workspace tests 成功（169 passed、16 ignored）。(a)(b)(d) の新規3テスト成功。(d) は probe 呼出し削除・fallback 削除の両 sentinel で assertion 失敗し、復元後に全テスト再成功。
+
 ## [0.7.1] - 2026-10-16
 
 ### Fixed
