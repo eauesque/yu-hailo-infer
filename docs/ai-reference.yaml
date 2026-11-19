@@ -8,7 +8,7 @@ meta:
     call it). Read this file first to know WHAT the service exposes and
     WHY it behaves the way it does; read docs-index.yaml + the referenced
     source when you need exact code-level detail.
-  last_updated: "2026-07-20"
+  last_updated: "2026-11-19"
   audience: "AI agents (Claude Code, Codex, etc.) doing setup/config/debug/integration work on this repo — not written for human readers"
   known_staleness_warning: >
     README.md's "Quick Start" curl/CLI example is outdated as of the
@@ -24,7 +24,7 @@ meta:
 philosophy:
   - "inference-only scope: this crate serves model inference over HTTP and nothing else. Vector search, index building (e.g. usearch), and persistent storage (DB) are explicitly out of scope — that's the calling application's job. Do not add such features here even if a caller would find it convenient."
   - "danger-first evaluation (see docs/NAME_ORIGIN/COVENANT.md, a philosophy doc shared across multiple repos by the same author): every new input surface (base64 payload, path, HEF override) is designed by asking 'what could a malicious/malformed input do here' before 'what does a well-behaved caller send.'"
-  - "single-device serialization: ALL HailoRT inference calls across ALL endpoints share one process-wide Mutex (hailort_device_lock in router.rs). There is exactly one physical Hailo-10H device; the lock exists so concurrent HTTP requests don't race on it. This means throughput across DIFFERENT endpoints is also serialized, not just within one endpoint — a slow LLM generation blocks a concurrent YOLO detect request on the same process."
+  - "single-device serialization: ALL HailoRT inference calls across ALL endpoints share one dedicated device thread (run_hailort_task in router.rs). At most four tasks may wait; overflow returns503. Cancelled requests are skipped before execution. There is exactly one physical Hailo-10H device; the lock exists so concurrent HTTP requests don't race on it. This means throughput across DIFFERENT endpoints is also serialized, not just within one endpoint — a slow LLM generation blocks a concurrent YOLO detect request on the same process."
   - "fail-closed on auth, fail-loud otherwise: missing/invalid bearer token -> 401 before any handler logic runs, on every endpoint. Decode/validation failures return a structured 4xx (see response_envelope below) rather than panicking or silently returning empty/wrong data. There is no fail-open feature-degradation behavior in this codebase, unlike some other repos by this author — every error is surfaced to the caller."
   - "DoS-hardening pattern (see speech2text_transcribe as the canonical recent example, docs/superpowers/specs/2026-07-20-speech2text-transcribe-design.md): base64/decoded-size limits are checked BEFORE the expensive decode/allocation happens, not after. When adding a new endpoint that decodes a client-supplied payload (image, audio, etc.), follow this same order: (1) reject on raw encoded size, (2) decode, (3) reject on decoded/projected size using checked arithmetic BEFORE any resampling/resizing allocation, (4) do the expensive work."
   - "GPL/LGPL/AGPL dependencies are prohibited (see CLAUDE.md). Check license before adding any new crate."
@@ -49,9 +49,8 @@ security_model:
       401 Unauthorized with body `{"error": "invalid auth token"}` — NOTE:
       this shape does NOT match the normal api_error envelope
       (`{"ok":false,"error":"<code>","message":"..."}`, see
-      response_envelope below). Auth failures are the one endpoint-family
-      response that doesn't go through api_error(). If you're writing a
-      client, handle both shapes.
+      response_envelope below). WD HEF errors also use an error-only
+      body; see wd_tagger.hef_errors. Clients must handle both shapes.
     exempt_routes: ["GET /healthz"]
   scan_roots_allowlist:
     purpose: "WD-Tagger's infer_wd endpoint takes an arbitrary `path` field. check_scan_roots() requires the canonicalized path to start with one of AppState.scan_roots (populated at startup from the startup contract, updatable at runtime via POST /_internal/scan-roots-changed) — this is the ONLY path-traversal guard in the service; it applies to infer_wd only, not to hef_path/model_dir overrides on other endpoints (see trust_boundary above)."
@@ -73,6 +72,7 @@ response_envelope:
   success: '{"ok": true, "error": null, "data": {...}}  (api_ok())'
   error: '{"ok": false, "error": "<snake_case_code>", "message": "human-readable string"}  (api_error(), HTTP status varies by code — see each feature entry)'
   auth_failure_exception: '401 responses use {"error": "invalid auth token"} instead — see security_model.auth_model.failure_response'
+  wd_exception: 'WD success uses {"ok":true,"backend_applied":"onnx|hef","profile_applied":false,"data":{...}}; profile_applied is true when a profile was supplied. HEF errors use only {"error":"<code>"}, without path/detail/message; auth and JSON extraction retain their existing responses.'
 
 features:
   - name: embeddinggemma2_text
@@ -87,8 +87,9 @@ features:
   - name: healthz
     endpoints: ["GET /healthz"]
     auth_required: false
-    purpose: "Liveness probe. Returns {ok: true, uptime_secs, instance_id, hailo_stub} and text_embed endpoint capability (model, revision, precision, dim, verification: at_load). Capability does not assert artifact presence or verified encoder readiness. hailo_stub is true when the binary links the HailoRT stub shim."
-    related_code: "yu-hailo-infer/src/router.rs::healthz"
+    purpose: "Liveness probe. Returns {ok, hailo_session_lost, uptime_secs, instance_id, hailo_stub, wd_hef}, clip_image_onnx model presence, and text_embed capability/execution fields. hailo_stub is true when the binary links the stub shim. wd_hef is true only in real Linux builds with the WD HEF route compiled; always false in stub builds. Missing wd_hef in old responses means unsupported. Health does not open HEFs, touch WD caches, or create a VDevice; capability does not establish model presence, device readiness, or device acceptance."
+    hailo_session_lost: "Always present: false normally; HAILO_COMMUNICATION_CLOSED makes it true and ok false process-wide. All new/queued Hailo work returns 503 without calling HailoRT; WD HEF uses device_error, other routes retain their error shape. CPU ONNX routes remain available while draining. After a short delay, run() drains HTTP responses then exits 70 (EX_SOFTWARE) for yu-server respawn. A fresh process is required to recover."
+    related_code: "yu-hailo-infer/src/router.rs::healthz; hailort/error.rs::session; lib.rs::run"
 
   - name: scan_roots_hot_reload
     endpoints: ["POST /_internal/scan-roots-changed"]
@@ -100,9 +101,24 @@ features:
     endpoints: ["POST /v1/infer/wd"]
     auth_required: true
     purpose: "WD-Tagger anime/illustration tagging on an image file already present on disk (NOT a base64 upload — this endpoint takes a `path`, sandboxed by scan_roots_allowlist). Returns tags above general_thr (default 0.35) / character_thr (default 0.85)."
-    config_fields: ["model_id (validated against a known-model allowlist, see check_model_id)", "path", "general_thr", "character_thr"]
-    model_source: "AppState.wd_cache_dir (CLI --wd-cache-dir, required, no default) — caches loaded models in AppState.wd_infer keyed by model_id."
-    related_code: "yu-hailo-infer/src/router.rs::infer_wd, yu-hailo-infer-core/src/engine.rs (WdInferEngine), yu-hailo-infer-core/src/tags.rs"
+    config_fields: ["model_id (rejects slash, backslash, and ..)", "path", "general_thr", "character_thr", "profile (optional)", "model_subdir (optional relative directory)", "backend (onnx default, or hef)", "hef_path (required for hef; no default path)", "hef_sha256 (required for hef; 64 lowercase hex; ignored and never logged for onnx)", "timeout_ms (HEF only; default and cap 120000)"]
+    model_source: "AppState.wd_cache_dir (CLI --wd-cache-dir, required, no default). ONNX retains only the latest directory/profile recipe, including thresholds; changing recipes evicts the previous entry, with active requests retaining their references. ONNX output must be [tags] or [1,tags] with exactly the vocabulary length. HEF also requires model.onnx and selected_tags.csv; the sidecar does not automatically fall back to ONNX."
+    hef_contract: "ViT UINT8 only: one input, 448x448x3 BGR/NHWC, 602112 bytes; one UINT8 output with exactly the vocabulary length. Shared white-pad/Lanczos3 preprocessing; incompatible profiles rejected; manual f32 dequantization (q - zero_point) * scale. These changes require device acceptance testing; this revision establishes no accuracy, fps, memory, or concurrent residency measurements."
+    hef_file_checks: "Open O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC; fstat and bounded read on the same fd. Regular files only, maximum 256 MiB, including growth after fstat; reject terminal symlinks and special files. Compute SHA256 of the bounded bytes from that same fd and compare all 32 bytes with hef_sha256 before HailoRT open/metadata/configure; mismatch is hef_invalid. Pass the verified bytes to HailoRT MemoryView without reopening by path. These checks do not impose a HEF path allowlist; scan roots apply to the image path."
+    hef_cache: "One WD HEF slot on the shared device thread, separate from the ONNX recipe cache. Open/fstat each request; cache key is dev/inode/size/mtime including nanoseconds. Cache hits require both the file key and verified digest to match; a different requested digest forces rereading and verification. On key/digest change, evict the old WD handle before reading/creating/configuring the replacement. All model handles share one process-static VDevice; health never accesses this cache."
+    hef_errors:
+      body: '{"error":"<code>"} only; no path, detail, or message. Auth and JSON extraction/type validation retain existing responses.'
+      table:
+        - {http: 503, error: hef_invalid, condition: "Missing hef_path or missing/malformed/mismatched hef_sha256 with backend=hef"}
+        - {http: 403, error: "path outside allowed roots", condition: "Image scan-root refusal; shared ONNX response"}
+        - {http: 422, error: image_invalid, condition: "Image canonicalization/decode/preprocessing failure"}
+        - {http: 503, error: hef_not_found, condition: "Missing/unreadable HEF"}
+        - {http: 503, error: hef_invalid, condition: "Invalid HEF type/size/metadata/profile"}
+        - {http: 503, error: device_busy, condition: "Device queue or preprocessing budget full"}
+        - {http: 503, error: device_error, condition: "HailoRT failure/session lost/degraded/stopped device thread"}
+        - {http: 503, error: hef_timeout, condition: "Sidecar response deadline expired"}
+        - {http: 503, error: model_not_downloaded, condition: "Missing vocabulary or model.onnx"}
+    related_code: "yu-hailo-infer/src/router.rs::infer_wd, wd_wire.rs, wd_hef_route.rs, hailort/wd_hef.rs, yu-hailo-infer-core/src/wd_recipe.rs, engine.rs (WdInferEngine), tags.rs"
 
   - name: yolo_detect
     endpoints: ["GET /v1/infer/yolo/metadata", "GET /v1/infer/yolo/smoke-zero", "POST /v1/infer/yolo/detect"]
@@ -185,7 +201,7 @@ glossary:
   HEF: "Hailo Executable Format — the compiled model binary format HailoRT loads and runs on Hailo hardware. Not portable across Hailo device generations (Hailo-8 vs Hailo-10H) or usually across model architectures."
   HailoRT: "Hailo's runtime SDK (C++, wrapped here via a cxx-based FFI shim — see yu-hailo-infer/src/hailort/ffi.rs, shim.cpp/shim.rs) for loading HEFs and running inference on Hailo devices."
   genai: "HailoRT's higher-level API surface (hailort::genai namespace in the C++ SDK) for LLM/VLM/Speech2Text-style generative workloads, as opposed to the lower-level VStream API used for YOLO/CLIP-image."
-  VDevice: "HailoRT's handle to a physical Hailo device; created once per Llm/Vlm/Speech2Text/etc. instance in this codebase (each request currently creates a fresh one rather than pooling — see hailort/*.rs `create()` methods)."
+  VDevice: "HailoRT's virtual-device handle. shim.cpp::shared_vdevice lazily initializes one process-static shared VDevice for all model handles, including WD HEF; it is not created per request. Health does not initialize it."
   dequantize: "Converting a HEF's raw quantized (typically uint8) tensor output back to float using the HEF's embedded scale/zero-point metadata — see yu-hailo-infer/src/hailort/metadata.rs and yu-hailo-infer-core/src/yolo_postprocess.rs for the two places this logic lives."
   NMS: "Non-Maximum Suppression — the algorithm that collapses overlapping YOLO detection boxes down to one per object. Either done server-side in yu-hailo-infer-core/src/yolo_postprocess.rs, or already baked into the HEF's own output (see is_nms_output detection in the same file)."
   scan_roots: "The startup-time (+ hot-reloadable) allowlist of filesystem path prefixes that WD-Tagger's `path` field is permitted to resolve under — see security_model.scan_roots_allowlist."

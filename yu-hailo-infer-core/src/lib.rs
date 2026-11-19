@@ -7,6 +7,7 @@ mod ep;
 pub mod error;
 pub mod profile;
 pub mod tags;
+pub mod wd_recipe;
 pub mod yolo_labels;
 pub mod yolo_onnx;
 pub mod yolo_postprocess;

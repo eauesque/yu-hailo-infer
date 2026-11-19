@@ -10,12 +10,20 @@
 #include <string>
 #include <vector>
 
+static_assert(HAILO_FORMAT_ORDER_NHWC == 1,
+    "Must match ffi.rs HAILO_FORMAT_ORDER_NHWC");
+
 struct YuHailortYolo {
     std::shared_ptr<hailort::VDevice> vdevice;
     std::shared_ptr<hailort::InferModel> infer_model;
     std::unique_ptr<hailort::ConfiguredInferModel> configured;
     std::vector<YuHailortTensorInfo> inputs;
     std::vector<YuHailortTensorInfo> outputs;
+};
+
+struct YuHailortWd {
+    YuHailortYolo model;
+    bool metadata_ready = false;
 };
 
 struct YuHailortSpeech2Text {
@@ -132,6 +140,7 @@ static YuHailortTensorInfo tensor_info_from_stream(const hailort::InferModel::In
     info.features = shape.features;
     info.format_type = static_cast<uint32_t>(format.type);
     info.frame_size = stream.get_frame_size();
+    info.format_order = static_cast<uint32_t>(format.order);
     if (!quant_infos.empty()) {
         info.qp_zp = quant_infos[0].qp_zp;
         info.qp_scale = quant_infos[0].qp_scale;
@@ -258,6 +267,104 @@ int yu_hailort_yolo_run(
     }
 
     return ctx->configured->run(bindings.value(), std::chrono::milliseconds(timeout_ms));
+}
+
+int yu_hailort_wd_open(const uint8_t *hef, size_t size, YuHailortWd **out)
+try {
+    if (nullptr == out) return HAILO_INVALID_ARGUMENT;
+    *out = nullptr;
+    if ((nullptr == hef) || (size == 0)) return HAILO_INVALID_ARGUMENT;
+
+    hailo_status status;
+    auto vdevice = shared_vdevice(status);
+    if (!vdevice) return status;
+    // HailoRT 5.4.0 copies the HEF bytes before this call returns.
+    auto infer_model = vdevice->create_infer_model(
+        hailort::MemoryView(const_cast<uint8_t *>(hef), size));
+    if (!infer_model) return infer_model.status();
+
+    auto ctx = std::make_unique<YuHailortWd>();
+    ctx->model.vdevice = vdevice;
+    ctx->model.infer_model = infer_model.release();
+    *out = ctx.release();
+    return HAILO_SUCCESS;
+} catch (...) {
+    return HAILO_OUT_OF_HOST_MEMORY;
+}
+
+int yu_hailort_wd_metadata(YuHailortWd *ctx, YuHailortYoloMetadata *metadata)
+try {
+    if ((nullptr == ctx) || (nullptr == metadata) || ctx->model.configured) {
+        return HAILO_INVALID_ARGUMENT;
+    }
+    ctx->metadata_ready = false;
+    auto status = fill_metadata(&ctx->model);
+    if (HAILO_SUCCESS != status) return status;
+    status = static_cast<hailo_status>(yu_hailort_yolo_metadata(&ctx->model, metadata));
+    ctx->metadata_ready = (HAILO_SUCCESS == status);
+    return status;
+} catch (...) {
+    return HAILO_OUT_OF_HOST_MEMORY;
+}
+
+int yu_hailort_wd_configure(YuHailortWd *opened, YuHailortWd **out)
+try {
+    // Always consume opened; failure destroys its model without touching shared creation_status.
+    std::unique_ptr<YuHailortWd> ctx(opened);
+    if (nullptr == out) return HAILO_INVALID_ARGUMENT;
+    *out = nullptr;
+    if (!ctx || !ctx->metadata_ready || ctx->model.configured) return HAILO_INVALID_ARGUMENT;
+    auto configured = ctx->model.infer_model->configure();
+    if (!configured) return configured.status();
+    ctx->model.configured = std::make_unique<hailort::ConfiguredInferModel>(configured.release());
+    *out = ctx.release();
+    return HAILO_SUCCESS;
+} catch (...) {
+    return HAILO_OUT_OF_HOST_MEMORY;
+}
+
+void yu_hailort_wd_release(YuHailortWd *ctx) noexcept
+try {
+    delete ctx;
+} catch (...) {
+}
+
+bool yu_hailort_is_communication_closed(int status)
+{
+    return status == HAILO_COMMUNICATION_CLOSED;
+}
+
+bool yu_hailort_wd_is_timeout(int status)
+try {
+    return status == HAILO_TIMEOUT;
+} catch (...) {
+    return false;
+}
+
+bool yu_hailort_wd_is_invalid_hef(int status)
+try {
+    switch (status) {
+    case HAILO_INVALID_ARGUMENT:
+    case HAILO_INVALID_HEF:
+    case HAILO_HEF_FILE_CORRUPTED:
+    case HAILO_HEF_NOT_SUPPORTED:
+    case HAILO_HEF_NOT_COMPATIBLE_WITH_DEVICE:
+    case HAILO_INVALID_HEF_USE:
+        return true;
+    default:
+        return false;
+    }
+} catch (...) {
+    return false;
+}
+
+int yu_hailort_wd_run(YuHailortWd *ctx, const uint8_t *input, size_t input_size,
+    YuHailortBuffer *outputs, size_t outputs_count, uint32_t timeout_ms)
+try {
+    if ((nullptr == ctx) || !ctx->model.configured) return HAILO_INVALID_ARGUMENT;
+    return yu_hailort_yolo_run(&ctx->model, input, input_size, outputs, outputs_count, timeout_ms);
+} catch (...) {
+    return HAILO_OUT_OF_HOST_MEMORY;
 }
 
 void yu_hailort_string_free(char *value)

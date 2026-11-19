@@ -17,8 +17,23 @@ schema: HAILO_INFER_DOCS_INDEX_V1
 entries:
   - path: yu-hailo-infer/src/router.rs
     purpose: HTTPエンドポイント定義(axum router)。全`/v1/infer/*`ルートのハンドラ結線・認証ミドルウェア適用箇所。
-    key_symbols: [build_router, healthz, yolo_detect, clip_image, clip_text, llm_generate, vlm_generate]
-    when_to_read: "エンドポイント一覧・リクエスト/レスポンス形式・認証方式について聞かれた時"
+    key_symbols: [build_router, healthz, infer_wd, scan_roots_forbidden, yolo_detect, clip_image, clip_text, llm_generate, vlm_generate]
+    when_to_read: "エンドポイント一覧・healthのwd_hef能力申告・リクエスト/レスポンス形式・認証方式について聞かれた時"
+
+  - path: yu-hailo-infer/src/wd_wire.rs
+    purpose: WDのONNX/HEF要求・応答型とHEFエラー応答、応答期限の定義。
+    key_symbols: [WdBackend, InferWdRequest, InferWdResponse, hef_error, hef_timeout_ms]
+    when_to_read: "backend・hef_path・timeout_ms・backend_appliedについて聞かれた時"
+
+  - path: yu-hailo-infer/src/wd_hef_route.rs
+    purpose: WD HEFのprofile検証・画像前処理・実行・逆量子化・エラー変換。
+    key_symbols: [infer]
+    when_to_read: "WD HEFの実行経路・エラーコードについて聞かれた時"
+
+  - path: yu-hailo-infer/src/hailort/wd_hef.rs
+    purpose: HEFの同一fd検査・256 MiB上限付き読込と単一WD HEFキャッシュ。
+    key_symbols: [WdHefCache, WdHefError]
+    when_to_read: "HEFのO_NOFOLLOW検査・キャッシュ置換・旧handle解放について聞かれた時"
 
   - path: yu-hailo-infer/src/main.rs
     purpose: バイナリのエントリポイント。tracing初期化とyu_hailo_infer::run()呼び出しのみの薄いシム(実体はlib.rs)。

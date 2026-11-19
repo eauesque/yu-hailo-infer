@@ -20,8 +20,10 @@ use crate::hailort::{
     YoloModelMetadata,
 };
 use crate::speech2text_route::speech2text_transcribe_route;
+use crate::wd_wire::{InferWdResponse, WdBackend};
 
 pub use crate::speech2text_route::TranscribeRequest;
+pub use crate::wd_wire::InferWdRequest;
 
 const MAX_TEXT_BYTES: usize = 16 * 1024;
 const MAX_PROMPT_BYTES: usize = 16 * 1024;
@@ -64,7 +66,7 @@ const HAILORT_DEGRADED_MESSAGE: &str =
 const MEDIA_PREPROCESSING_PERMIT_BYTES: u64 = 1024 * 1024;
 const MAX_MEDIA_PREPROCESSING_BYTES: u64 = 256 * 1024 * 1024;
 /// Includes decoded pixels, encoded input, and transient resize allocations.
-const MAX_IMAGE_PREPROCESSING_RESERVATION_BYTES: u64 = 96 * 1024 * 1024;
+pub(crate) const MAX_IMAGE_PREPROCESSING_RESERVATION_BYTES: u64 = 96 * 1024 * 1024;
 
 #[derive(Debug)]
 pub(crate) enum MediaPreprocessError<E> {
@@ -192,8 +194,10 @@ async fn healthz(
             infer_core::embeddinggemma2::EmbeddingGemma2Cache::busy_execution()
         }
     };
+    let session_lost = crate::hailort::session::is_lost();
     Json(json!({
-        "ok": true,
+        "ok": !session_lost,
+        "hailo_session_lost": session_lost,
         "uptime_secs": state.started_at.elapsed().as_secs(),
         "instance_id": state.instance_id,
         "clip_image_onnx": infer_core::is_clip_image_model_downloaded(&state.clip_model_dir),
@@ -202,6 +206,7 @@ async fn healthz(
         // stub shim instead of real hardware. Callers (e.g. yu-server) use
         // this to distinguish a live device from a sidecar-only deployment.
         "hailo_stub": cfg!(hailo_stub),
+        "wd_hef": cfg!(all(target_os = "linux", not(hailo_stub))),
     }))
 }
 
@@ -252,31 +257,6 @@ async fn scan_roots_changed(
     Json(json!({"ok": true, "applied": true})).into_response()
 }
 
-#[derive(Deserialize)]
-pub struct InferWdRequest {
-    pub path: String,
-    pub model_id: String,
-    #[serde(default = "default_general_thr")]
-    pub general_thr: f32,
-    #[serde(default = "default_character_thr")]
-    pub character_thr: f32,
-    /// Full inference recipe, resolved by yu-server from its profile
-    /// registry. Absent means the built-in WD recipe, which is what every
-    /// caller predating this field expects.
-    ///
-    /// `default_thresholds` inside it is the *resolved* threshold table: the
-    /// caller has already decided whether the user's configured thresholds or
-    /// the profile's own defaults win, because that decision differs per
-    /// adapter family and belongs with the registry, not here.
-    #[serde(default)]
-    pub profile: Option<infer_core::WdProfileSpec>,
-    /// Variant subdirectory under the model's cache directory, for repos that
-    /// ship several builds (the Python side calls this `hf_subdir`). Validated
-    /// as a plain relative path before being joined.
-    #[serde(default)]
-    pub model_subdir: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct YoloDetectRequest {
     hef_path: Option<String>,
@@ -317,14 +297,6 @@ pub struct ClipTextRequest {
     text: String,
 }
 
-fn default_general_thr() -> f32 {
-    0.35
-}
-
-fn default_character_thr() -> f32 {
-    0.85
-}
-
 fn check_auth(state: &AppState, headers: &HeaderMap) -> bool {
     let Some(header_value) = headers.get(axum::http::header::AUTHORIZATION) else {
         return false;
@@ -338,7 +310,7 @@ fn check_auth(state: &AppState, headers: &HeaderMap) -> bool {
     auth_core::verify_token(token, &state.auth_token)
 }
 
-fn check_scan_roots(state: &AppState, real_path: &std::path::Path) -> bool {
+pub(crate) fn check_scan_roots(state: &AppState, real_path: &std::path::Path) -> bool {
     let scan_roots = state.scan_roots.read().unwrap();
     !scan_roots.roots.is_empty()
         && scan_roots
@@ -347,8 +319,16 @@ fn check_scan_roots(state: &AppState, real_path: &std::path::Path) -> bool {
             .any(|root| real_path.starts_with(root))
 }
 
-fn check_model_id(model_id: &str) -> bool {
+pub(crate) fn check_model_id(model_id: &str) -> bool {
     !(model_id.contains('/') || model_id.contains('\\') || model_id.contains(".."))
+}
+
+pub(crate) fn scan_roots_forbidden() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({"error": "path outside allowed roots"})),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -470,6 +450,8 @@ struct VlmKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ActiveHandle {
     InferModel(String),
+    #[cfg(target_os = "linux")]
+    Wd,
     Llm(LlmKey),
     Vlm(VlmKey),
 }
@@ -500,13 +482,55 @@ impl ResidentGenAi {
 pub(crate) struct DeviceCtx {
     // No eviction: 1-2 InferModel handles are hardware-verified; 3+ is extrapolated.
     infer_models: HashMap<String, ShimYolo>,
+    #[cfg(target_os = "linux")]
+    wd_hef: crate::hailort::wd_hef::WdHefCache,
     genai: Option<ResidentGenAi>,
     active: Option<ActiveHandle>,
     panic_discards: usize,
     degraded: bool,
 }
 
+#[cfg(all(test, hailo_stub, target_os = "linux"))]
+#[path = "wd_hef_device_tests.rs"]
+mod wd_hef_tests;
+
 impl DeviceCtx {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn with_wd_hef<T>(
+        &mut self,
+        path: &std::path::Path,
+        digest: [u8; 32],
+        validate: impl FnOnce(
+            &[crate::hailort::VStreamInfo],
+            &[crate::hailort::VStreamInfo],
+        ) -> Result<(), crate::hailort::wd_hef::WdHefError>,
+        task: impl FnOnce(
+            &mut crate::hailort::wd::ConfiguredWd,
+        ) -> Result<T, crate::hailort::wd_hef::WdHefError>,
+    ) -> Result<T, crate::hailort::wd_hef::WdHefError> {
+        self.active = Some(ActiveHandle::Wd);
+        self.wd_hef.with_model(path, digest, validate, task)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_wd_hef_metadata<T>(
+        &mut self,
+        path: &std::path::Path,
+        digest: [u8; 32],
+        validate: impl FnOnce(
+            &[crate::hailort::VStreamInfo],
+            &[crate::hailort::VStreamInfo],
+        ) -> Result<(), crate::hailort::wd_hef::WdHefError>,
+        task: impl FnOnce(
+            &mut crate::hailort::wd::ConfiguredWd,
+            &[crate::hailort::VStreamInfo],
+            &[crate::hailort::VStreamInfo],
+        ) -> Result<T, crate::hailort::wd_hef::WdHefError>,
+    ) -> Result<T, crate::hailort::wd_hef::WdHefError> {
+        self.active = Some(ActiveHandle::Wd);
+        self.wd_hef.with_metadata(path, digest, validate, task)
+    }
+
     fn infer_model(&mut self, hef_path: &str) -> HailoRtResult<&mut ShimYolo> {
         if !self.infer_models.contains_key(hef_path) {
             self.infer_models
@@ -619,6 +643,11 @@ impl DeviceCtx {
         let Some(active) = self.active.take() else {
             return HailoTaskError::Panicked;
         };
+        #[cfg(target_os = "linux")]
+        if matches!(active, ActiveHandle::Wd) {
+            self.wd_hef.evict();
+            return HailoTaskError::Panicked;
+        }
         if self.panic_discards >= MAX_PANIC_HANDLE_DISCARDS {
             self.degraded = true;
             return HailoTaskError::Unavailable(HAILORT_DEGRADED_MESSAGE);
@@ -627,7 +656,7 @@ impl DeviceCtx {
             ActiveHandle::InferModel(hef_path) => {
                 self.infer_models.remove(hef_path);
             }
-            ActiveHandle::Llm(_) | ActiveHandle::Vlm(_) => {
+            _ => {
                 if self
                     .genai
                     .as_ref()
@@ -645,6 +674,11 @@ impl DeviceCtx {
     where
         F: FnOnce(&mut Self) -> HailoRtResult<T>,
     {
+        if crate::hailort::session::is_lost() {
+            return Err(HailoTaskError::Unavailable(
+                crate::hailort::session::LOST_MESSAGE,
+            ));
+        }
         if self.degraded {
             return Err(HailoTaskError::Unavailable(HAILORT_DEGRADED_MESSAGE));
         }
@@ -661,6 +695,8 @@ impl DeviceCtx {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum HailoTaskError {
+    #[error("HailoRT device queue is full")]
+    QueueFull,
     #[error(transparent)]
     HailoRt(#[from] HailoRtError),
     #[error("HailoRT task panicked")]
@@ -671,9 +707,12 @@ pub(crate) enum HailoTaskError {
 
 impl HailoTaskError {
     fn status_code(&self) -> StatusCode {
+        if crate::hailort::session::is_lost() {
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
         match self {
             Self::HailoRt(HailoRtError::GenAiConflict { .. }) => StatusCode::CONFLICT,
-            Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Unavailable(_) | Self::QueueFull => StatusCode::SERVICE_UNAVAILABLE,
             Self::HailoRt(_) | Self::Panicked => StatusCode::BAD_REQUEST,
         }
     }
@@ -683,13 +722,24 @@ pub(crate) fn hailort_api_error(error: HailoTaskError, code: &'static str) -> Re
     api_error(error.status_code(), code, error.to_string())
 }
 
+pub(crate) fn hailort_session_error(code: &'static str) -> Option<Response> {
+    crate::hailort::session::is_lost().then(|| {
+        hailort_api_error(
+            HailoTaskError::Unavailable(crate::hailort::session::LOST_MESSAGE),
+            code,
+        )
+    })
+}
+
 // Only this closure and its Send result cross threads; DeviceCtx and device handles stay here.
 type DeviceTask = Box<dyn FnOnce(&mut DeviceCtx) + Send + 'static>;
 
-fn hailort_device_sender() -> &'static mpsc::Sender<DeviceTask> {
-    static SENDER: OnceLock<mpsc::Sender<DeviceTask>> = OnceLock::new();
+const MAX_PENDING_DEVICE_TASKS: usize = 4;
+
+fn hailort_device_sender() -> &'static mpsc::SyncSender<DeviceTask> {
+    static SENDER: OnceLock<mpsc::SyncSender<DeviceTask>> = OnceLock::new();
     SENDER.get_or_init(|| {
-        let (sender, receiver) = mpsc::channel::<DeviceTask>();
+        let (sender, receiver) = mpsc::sync_channel::<DeviceTask>(MAX_PENDING_DEVICE_TASKS);
         std::thread::Builder::new()
             .name("hailort-device".to_string())
             .spawn(move || {
@@ -711,12 +761,24 @@ where
     F: FnOnce(&mut DeviceCtx) -> HailoRtResult<T> + Send + 'static,
 {
     // Device tasks must never wait for other device work: this single queue is non-reentrant.
+    if crate::hailort::session::is_lost() {
+        return Err(HailoTaskError::Unavailable(
+            crate::hailort::session::LOST_MESSAGE,
+        ));
+    }
     let (sender, receiver) = tokio::sync::oneshot::channel();
     hailort_device_sender()
-        .send(Box::new(move |ctx| {
-            let _ = sender.send(ctx.run(task));
+        .try_send(Box::new(move |ctx| {
+            if !sender.is_closed() {
+                let _ = sender.send(ctx.run(task));
+            }
         }))
-        .map_err(|_| HailoTaskError::Unavailable("HailoRT device thread stopped"))?;
+        .map_err(|error| match error {
+            mpsc::TrySendError::Full(_) => HailoTaskError::QueueFull,
+            mpsc::TrySendError::Disconnected(_) => {
+                HailoTaskError::Unavailable("HailoRT device thread stopped")
+            }
+        })?;
     receiver.await.map_err(|_| HailoTaskError::Panicked)?
 }
 
@@ -914,6 +976,9 @@ async fn yolo_metadata(
     if let Some(response) = auth_error(&state, &headers) {
         return response;
     }
+    if let Some(response) = hailort_session_error("hailort_yolo_metadata_failed") {
+        return response;
+    }
     let hef_path = yolo_hef_path(&query);
     let hef_path_str = hef_path.to_string_lossy().to_string();
     let result = run_hailort_task({
@@ -933,6 +998,9 @@ async fn yolo_smoke_zero(
     Query(query): Query<HefQuery>,
 ) -> Response {
     if let Some(response) = auth_error(&state, &headers) {
+        return response;
+    }
+    if let Some(response) = hailort_session_error("hailort_yolo_metadata_failed") {
         return response;
     }
     let hef_path = yolo_hef_path(&query);
@@ -1089,6 +1157,9 @@ async fn yolo_detect(
     if let Some(response) = auth_error(&state, &headers) {
         return response;
     }
+    if let Some(response) = hailort_session_error("hailort_yolo_detect_failed") {
+        return response;
+    }
 
     use base64::Engine as _;
 
@@ -1210,6 +1281,9 @@ async fn clip_image(
     Json(body): Json<ClipImageRequest>,
 ) -> Response {
     if let Some(response) = auth_error(&state, &headers) {
+        return response;
+    }
+    if let Some(response) = hailort_session_error("hailort_clip_image_metadata_failed") {
         return response;
     }
     let ClipImageRequest {
@@ -1423,27 +1497,18 @@ async fn clip_image_onnx(
     let encoders = state.clip_image.clone();
     let result =
         tokio::task::spawn_blocking(move || -> Result<Vec<f32>, infer_core::InferError> {
-            let encoder = match encoders.read() {
-                Ok(cached) => cached.get(&cache_key).cloned(),
-                Err(_) => {
-                    return Err(infer_core::InferError::InvalidModelOutput(
+            let encoder = {
+                let mut cached = encoders.write().map_err(|_| {
+                    infer_core::InferError::InvalidModelOutput(
                         "CLIP image encoder cache lock poisoned".to_string(),
-                    ))
-                }
-            };
-            let encoder = match encoder {
-                Some(encoder) => encoder,
-                None => {
-                    let new_encoder = Arc::new(infer_core::ClipImageEncoder::new(&model_dir)?);
-                    let mut cached = encoders.write().map_err(|_| {
-                        infer_core::InferError::InvalidModelOutput(
-                            "CLIP image encoder cache lock poisoned".to_string(),
-                        )
-                    })?;
-                    cached
-                        .entry(cache_key)
-                        .or_insert_with(|| new_encoder.clone())
-                        .clone()
+                    )
+                })?;
+                if let Some(encoder) = cached.get(&cache_key) {
+                    encoder.clone()
+                } else {
+                    let encoder = Arc::new(infer_core::ClipImageEncoder::new(&model_dir)?);
+                    cached.insert(cache_key, encoder.clone());
+                    encoder
                 }
             };
             encoder.encode_rgb(&input, 224, 224)
@@ -1478,6 +1543,9 @@ async fn speech2text_tokenize(
     if let Some(response) = auth_error(&state, &headers) {
         return response;
     }
+    if let Some(response) = hailort_session_error("hailort_s2t_tokenize_failed") {
+        return response;
+    }
     if let Some(response) = validate_text_len(&body.text) {
         return response;
     }
@@ -1506,6 +1574,9 @@ async fn llm_tokenize(
     if let Some(response) = auth_error(&state, &headers) {
         return response;
     }
+    if let Some(response) = hailort_session_error("hailort_llm_tokenize_failed") {
+        return response;
+    }
     if let Some(response) = validate_text_len(&body.text) {
         return response;
     }
@@ -1529,6 +1600,9 @@ async fn llm_generate(
     Json(body): Json<LlmGenerateRequest>,
 ) -> Response {
     if let Some(response) = auth_error(&state, &headers) {
+        return response;
+    }
+    if let Some(response) = hailort_session_error("hailort_llm_generate_failed") {
         return response;
     }
     if body.prompt.len() > MAX_PROMPT_BYTES {
@@ -1562,6 +1636,9 @@ async fn llm_generate_stream(
     Json(body): Json<LlmGenerateStreamRequest>,
 ) -> Response {
     if let Some(response) = auth_error(&state, &headers) {
+        return response;
+    }
+    if let Some(response) = hailort_session_error("hailort_llm_generate_failed") {
         return response;
     }
     if body.messages.is_empty() {
@@ -1652,11 +1729,17 @@ async fn llm_generate_stream(
     tokio::spawn(async move {
         let work_tx = tx.clone();
         let result = run_hailort_task(move |ctx| {
+            if work_tx.is_closed() {
+                return Ok(());
+            }
             let llm = ctx.llm_for_generation(&hef_path_str, None, false)?;
             // LlmStream borrows the handle, so the whole generation stays in one device task.
             let mut stream = LlmStream::start(llm, &messages, &tools, params)?;
             let mut full_text = String::new();
             for _ in 0..MAX_LLM_STREAM_READS {
+                if work_tx.is_closed() {
+                    return Ok(());
+                }
                 let (token, status) = stream.read_next(timeout_ms)?;
                 full_text.push_str(&token);
                 let _ = work_tx.send(sse_data_event(json!({"token": token})));
@@ -1736,6 +1819,9 @@ async fn vlm_generate(
     if let Some(response) = auth_error(&state, &headers) {
         return response;
     }
+    if let Some(response) = hailort_session_error("hailort_vlm_generate_failed") {
+        return response;
+    }
     if let Err(response) = validate_vlm_input(&body.prompt, &body.frames) {
         return *response;
     }
@@ -1812,6 +1898,9 @@ async fn vlm_generate_stream(
     if let Some(response) = auth_error(&state, &headers) {
         return response;
     }
+    if let Some(response) = hailort_session_error("hailort_vlm_generate_failed") {
+        return response;
+    }
     if let Some(max_generated_tokens) = body.max_generated_tokens {
         if max_generated_tokens > MAX_VLM_GENERATED_TOKENS {
             return api_error(
@@ -1881,6 +1970,9 @@ async fn vlm_generate_stream(
     tokio::spawn(async move {
         let work_tx = tx.clone();
         let result = run_hailort_task(move |ctx| {
+            if work_tx.is_closed() {
+                return Ok(());
+            }
             let vlm = ctx.vlm_for_generation(&hef_path_str, false)?;
             let info = vlm.input_frame_info()?;
             // Keep resizing here in Stage 3: splitting the device query from preprocessing
@@ -1894,6 +1986,9 @@ async fn vlm_generate_stream(
             // VlmStream borrows the handle, so the whole generation stays in one device task.
             let mut full_text = String::new();
             for _ in 0..MAX_VLM_STREAM_READS {
+                if work_tx.is_closed() {
+                    return Ok(());
+                }
                 let (token, status) = stream.read_next(timeout_ms)?;
                 full_text.push_str(&token);
                 let _ = work_tx.send(sse_data_event(json!({"token": token})));
@@ -1943,6 +2038,20 @@ async fn infer_wd(
             .into_response();
     }
 
+    if body.backend == Some(WdBackend::Hef) && crate::hailort::session::is_lost() {
+        return crate::wd_wire::hef_error(StatusCode::SERVICE_UNAVAILABLE, "device_error");
+    }
+    match body.hef_options() {
+        Ok(Some(_)) => {
+            #[cfg(target_os = "linux")]
+            return crate::wd_hef_route::infer(state, body).await;
+            #[cfg(not(target_os = "linux"))]
+            return crate::wd_wire::hef_error(StatusCode::SERVICE_UNAVAILABLE, "device_error");
+        }
+        Err(response) => return *response,
+        Ok(None) => {}
+    }
+
     let real_path = match std::fs::canonicalize(&body.path) {
         Ok(p) => p,
         Err(_) => {
@@ -1955,11 +2064,7 @@ async fn infer_wd(
     };
 
     if !check_scan_roots(&state, &real_path) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "path outside allowed roots"})),
-        )
-            .into_response();
+        return scan_roots_forbidden();
     }
 
     if !check_model_id(&body.model_id) {
@@ -2023,15 +2128,17 @@ async fn infer_wd(
     let result = tokio::task::spawn_blocking(move || {
         let engine = {
             let mut engines = wd_infer.write().unwrap();
-            match engines.entry(cache_key) {
-                std::collections::hash_map::Entry::Occupied(slot) => Ok(slot.get().clone()),
-                std::collections::hash_map::Entry::Vacant(slot) => {
+            match engines.get(&cache_key) {
+                Some(engine) => Ok(engine.clone()),
+                None => {
                     // Constructing the engine reads the vocabulary off disk and
                     // can fail on a corrupt or mismatched file. Propagate that
                     // instead of panicking inside the blocking pool.
+                    // Keep only the current recipe; threshold edits must not retain old sessions.
+                    engines.clear();
                     infer_core::WdInferEngine::new(&model_dir, spec).map(|engine| {
                         let engine = Arc::new(engine);
-                        slot.insert(engine.clone());
+                        engines.insert(cache_key, engine.clone());
                         engine
                     })
                 }
@@ -2043,8 +2150,14 @@ async fn infer_wd(
 
     match result {
         Ok(Ok(tag_result)) => {
-            Json(json!({"ok": true, "data": tag_result, "profile_applied": profile_applied}))
-                .into_response()
+            // Preserve the legacy JSON float representation.
+            Json(json!(InferWdResponse {
+                backend_applied: WdBackend::Onnx,
+                data: tag_result,
+                ok: true,
+                profile_applied,
+            }))
+            .into_response()
         }
         Ok(Err(e)) => {
             tracing::error!("yu-infer wd inference error: {e}");
@@ -2071,6 +2184,10 @@ async fn infer_wd(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(target_os = "linux", hailo_stub))]
+    mod wd_hef_route_tests {
+        include!("wd_hef_route_tests.rs");
+    }
     use super::*;
     #[cfg(hailo_stub)]
     use crate::hailort::stub_counts;
@@ -2104,6 +2221,112 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(MediaPreprocessError::Busy)));
+    }
+
+    #[tokio::test]
+    async fn device_queue_rejects_overflow_and_skips_cancelled_work() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first = run_hailort_task(move |_| {
+            let _ = started_tx.send(());
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            Ok(())
+        });
+        tokio::pin!(first);
+        assert!(futures_util::poll!(&mut first).is_pending());
+        started_rx.await.unwrap();
+
+        let executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancelled = run_hailort_task({
+            let executed = executed.clone();
+            move |_| {
+                executed.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+        });
+        let mut cancelled = Box::pin(cancelled);
+        assert!(futures_util::poll!(&mut cancelled).is_pending());
+        let (drained_tx, drained_rx) = tokio::sync::oneshot::channel();
+        for _ in 1..MAX_PENDING_DEVICE_TASKS - 1 {
+            assert!(hailort_device_sender().try_send(Box::new(|_| {})).is_ok());
+        }
+        assert!(hailort_device_sender()
+            .try_send(Box::new(move |_| {
+                let _ = drained_tx.send(());
+            }))
+            .is_ok());
+        let error = run_hailort_task(|_| Ok(())).await.unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+        drop(cancelled);
+        release_tx.send(()).unwrap();
+        first.await.unwrap();
+        drained_rx.await.unwrap();
+        assert!(!executed.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn wd_threshold_changes_evict_previous_sessions() {
+        let root = std::env::temp_dir().join(format!(
+            "yu-wd-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let model_dir = root.join("model");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../yu-hailo-infer-core/tests/fixtures/yolo_constant.onnx"
+            ),
+            model_dir.join("model.onnx"),
+        )
+        .unwrap();
+        std::fs::write(
+            model_dir.join("selected_tags.csv"),
+            "name,category\ncat,0\n",
+        )
+        .unwrap();
+        let image = root.join("invalid.png");
+        std::fs::write(&image, b"invalid image").unwrap();
+        let mut state = test_state(vec![root.canonicalize().unwrap()]);
+        state.wd_cache_dir = root.clone();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", state.auth_token).parse().unwrap(),
+        );
+        let mut previous = None;
+        for threshold in [0.1, 0.2, 0.3] {
+            let request = InferWdRequest {
+                path: image.to_string_lossy().into_owned(),
+                model_id: "model".into(),
+                general_thr: threshold,
+                character_thr: 0.85,
+                profile: None,
+                model_subdir: None,
+                backend: None,
+                hef_path: None,
+                hef_sha256: None,
+                timeout_ms: None,
+            };
+            let response = infer_wd(State(state.clone()), headers.clone(), Json(request))
+                .await
+                .into_response();
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let cache = state.wd_infer.read().unwrap();
+            assert_eq!(cache.len(), 1);
+            if let Some(previous) = previous.take() {
+                assert!(std::sync::Weak::upgrade(&previous).is_none());
+            }
+            previous = Some(Arc::downgrade(cache.values().next().unwrap()));
+        }
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2512,6 +2735,136 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    fn wd_wire_fixture() -> (PathBuf, AppState, Value) {
+        let root = std::env::temp_dir().join(format!(
+            "yu-wd-wire-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let model_dir = root.join("model");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        // ONNX IR 8/opset 13: float NHWC [1,448,448,3] input, constant [1,1] score 0.9.
+        std::fs::write(model_dir.join("model.onnx"), b"\x08\x08\x3a\x7c\x0a\x34\x12\x06\x6f\x75\x74\x70\x75\x74\x22\x08\x43\x6f\x6e\x73\x74\x61\x6e\x74\x2a\x20\x0a\x05\x76\x61\x6c\x75\x65\x2a\x14\x08\x01\x08\x01\x10\x01\x42\x06\x73\x63\x6f\x72\x65\x73\x4a\x04\x66\x66\x66\x3f\xa0\x01\x04\x12\x07\x77\x64\x2d\x77\x69\x72\x65\x5a\x21\x0a\x05\x69\x6e\x70\x75\x74\x12\x18\x0a\x16\x08\x01\x12\x12\x0a\x02\x08\x01\x0a\x03\x08\xc0\x03\x0a\x03\x08\xc0\x03\x0a\x02\x08\x03\x62\x18\x0a\x06\x6f\x75\x74\x70\x75\x74\x12\x0e\x0a\x0c\x08\x01\x12\x08\x0a\x02\x08\x01\x0a\x02\x08\x01\x42\x02\x10\x0d").unwrap();
+        std::fs::write(
+            model_dir.join("selected_tags.csv"),
+            "name,category\ncat,0\n",
+        )
+        .unwrap();
+        let image = root.join("image.png");
+        image::RgbImage::new(1, 1).save(&image).unwrap();
+        let mut state = test_state(vec![root.canonicalize().unwrap()]);
+        state.wd_cache_dir = root.clone();
+        let body = json!({"path": image, "model_id": "model"});
+        (root, state, body)
+    }
+
+    async fn wd_wire_request(state: AppState, body: Value) -> (StatusCode, Value) {
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/infer/wd")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| Value::String(String::from_utf8(bytes.to_vec()).unwrap())),
+        )
+    }
+
+    #[tokio::test]
+    async fn wd_wire_omitted_backend_preserves_onnx_response() {
+        let (root, state, body) = wd_wire_fixture();
+        let (status, response) = wd_wire_request(state, body.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            response,
+            json!({
+                "ok": true,
+                "data": {"tags": [{"tag": "cat", "confidence": f64::from(0.9_f32), "category": "general"}],
+                    "rating": "general", "path": body["path"], "model_id": "model"},
+                "profile_applied": false,
+                "backend_applied": "onnx"
+            })
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wd_wire_missing_path_preserves_legacy_422() {
+        let (root, state, mut body) = wd_wire_fixture();
+        body.as_object_mut().unwrap().remove("path");
+        let (status, _) = wd_wire_request(state, body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wd_wire_unknown_backend_rejects() {
+        let (root, state, mut body) = wd_wire_fixture();
+        body["backend"] = json!("auto");
+        let (status, _) = wd_wire_request(state, body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wd_wire_hef_requires_path() {
+        let (root, state, mut body) = wd_wire_fixture();
+        body["backend"] = json!("hef");
+        let (status, response) = wd_wire_request(state, body).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response, json!({"error": "hef_invalid"}));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wd_wire_onnx_ignores_hef_path_and_timeout() {
+        let (root, state, mut body) = wd_wire_fixture();
+        let hef_path = root.join("never-created.hef");
+        assert!(!hef_path.exists());
+        body["backend"] = json!("onnx");
+        body["hef_path"] = json!(hef_path);
+        body["timeout_ms"] = json!(0);
+        body["hef_sha256"] = json!("ignored garbage");
+        let (status, response) = wd_wire_request(state, body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["backend_applied"], "onnx");
+        assert!(!response.to_string().contains(hef_path.to_str().unwrap()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wd_wire_hef_never_falls_through_to_onnx() {
+        let (root, state, mut body) = wd_wire_fixture();
+        body["backend"] = json!("hef");
+        body["hef_path"] = json!(root.join("never-created.hef"));
+        body["hef_sha256"] = json!("0".repeat(64));
+        for timeout in [None, Some(120_000), Some(u32::MAX)] {
+            if let Some(timeout) = timeout {
+                body["timeout_ms"] = json!(timeout);
+            }
+            let (status, response) = wd_wire_request(state.clone(), body.clone()).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response, json!({"error": "hef_not_found"}));
+            assert!(state.wd_infer.read().unwrap().is_empty());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn infer_wd_rejects_empty_scan_roots() {
         let dir = std::env::temp_dir().join("yu-infer-empty-scan-roots-test");
@@ -2603,6 +2956,8 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["instance_id"], "test-instance");
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["hailo_session_lost"], false);
         assert_eq!(body["clip_image_onnx"], false);
         assert_eq!(
             body["text_embed"]["model"],
@@ -2616,6 +2971,10 @@ mod tests {
         assert_eq!(body["text_embed"]["onnx_execution"]["loaded"], false);
         assert!(body["text_embed"]["onnx_execution"]["registered_providers"].is_null());
         assert_eq!(body["hailo_stub"], cfg!(hailo_stub));
+        assert_eq!(
+            body["wd_hef"],
+            cfg!(all(target_os = "linux", not(hailo_stub)))
+        );
 
         std::fs::write(model_dir.join("vision_model.onnx"), b"model").unwrap();
         let response = build_router(state)
@@ -2633,6 +2992,39 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["clip_image_onnx"], true);
         std::fs::remove_dir_all(model_dir).unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(all(hailo_stub, target_os = "linux"))]
+    async fn t10_health_does_not_open_wd_or_create_vdevice() {
+        let before_device = stub_counts().vdevice_create;
+        let before_wd = run_hailort_task(|_| Ok(crate::hailort::wd_hef::tests::stub::counts()))
+            .await
+            .unwrap();
+        let state = test_state(vec![]);
+        let response = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let after_wd = run_hailort_task(|_| Ok(crate::hailort::wd_hef::tests::stub::counts()))
+            .await
+            .unwrap();
+        assert_eq!(stub_counts().vdevice_create, before_device);
+        assert_eq!(after_wd[1], before_wd[1], "wd_open count changed");
+        assert_eq!(after_wd, before_wd, "health must not touch WD handles");
+        assert!(state.wd_infer.read().unwrap().is_empty());
+        assert_eq!(body["hailo_stub"], true);
+        assert_eq!(body["wd_hef"], false);
     }
 
     #[tokio::test]

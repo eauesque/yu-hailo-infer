@@ -7,6 +7,19 @@
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- WD-TaggerのHEFバックエンドを追加。`backend` / `hef_path` / `timeout_ms`、成功時の `backend_applied`、pathを含まないHEFエラー、256 MiB・末端symlink拒否・単一WD HEFキャッシュに対応。`/healthz.wd_hef` はLinuxの実ビルドのみtrue、stubではfalseを返し、health要求でHEFやVDeviceを開かない。ONNXは引き続き既定。HEF推論の精度・速度・同時常駐は実機受入検証まで未検証。
+
+### Fixed
+
+- HEF要求の `hef_sha256`（小文字16進数64桁）を必須化し、同じ検査済みfdの内容をopen前に照合。cache再利用にもdigest一致を要求し、ONNXでは無視する。HailoRT session喪失後はHailo要求を503で拒否し、`/healthz` に常設の `hailo_session_lost` と `ok:false` を返す。HTTP応答完了後に70（`EX_SOFTWARE`）で終了して再起動を促す。
+- HailoRT の待機を最大4件に制限し、超過は503で返す。実行前の切断済み要求と、切断されたLLM/VLMストリームの不要な生成を停止する。
+- WDキャッシュを直近1設定に制限し、閾値変更で古いモデルを保持し続けない。出力形状・タグ件数の不一致はエラーにする。
+- CLIP画像ONNXの初回ロードを直列化し、同時要求による重複ロードを防ぐ。リリースCIもローカルと同じ直列テスト実行に統一する。
+
 ## [0.7.2] - 2026-10-16
 
 ### Fixed

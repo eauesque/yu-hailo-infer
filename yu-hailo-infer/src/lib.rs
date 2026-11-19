@@ -11,6 +11,9 @@ pub mod router;
 pub mod speech2text_route;
 pub mod startup;
 mod text_embed_route;
+#[cfg(target_os = "linux")]
+mod wd_hef_route;
+pub mod wd_wire;
 
 use clap::Parser;
 use std::collections::HashMap;
@@ -62,7 +65,5 @@ pub async fn run() {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("bind yu-infer listener");
-    axum::serve(listener, app)
-        .await
-        .expect("yu-infer server error");
+    hailort::session::serve(listener, app, |code| std::process::exit(code)).await;
 }

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path, sync::Mutex};
+use std::{path::Path, sync::Mutex};
 
 use image::imageops::FilterType;
 use ndarray::{Array, ArrayD};
@@ -14,11 +14,11 @@ use crate::{
 
 /// WD inputs are reduced to the model's fixed-size canvas, so decoding images
 /// larger than this consumes memory without improving inference quality.
-const MAX_WD_DECODED_IMAGE_DIMENSION: u32 = 4096;
-const MAX_WD_DECODED_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_WD_DECODED_IMAGE_DIMENSION: u32 = 4096;
+pub(crate) const MAX_WD_DECODED_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 const WD_DECODED_BYTES_PER_PIXEL: u64 = 4;
 
-fn validate_wd_image_dimensions(width: u32, height: u32) -> Result<(), InferError> {
+pub(crate) fn validate_wd_image_dimensions(width: u32, height: u32) -> Result<(), InferError> {
     if width == 0
         || height == 0
         || width > MAX_WD_DECODED_IMAGE_DIMENSION
@@ -39,6 +39,20 @@ fn validate_wd_image_dimensions(width: u32, height: u32) -> Result<(), InferErro
     if decoded_bytes > MAX_WD_DECODED_IMAGE_BYTES {
         return Err(InferError::InvalidModelOutput(format!(
             "WD image requires {decoded_bytes} decoded bytes, exceeding the {MAX_WD_DECODED_IMAGE_BYTES}-byte limit"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_wd_output(
+    shape: &[i64],
+    score_count: usize,
+    tag_count: usize,
+) -> Result<(), InferError> {
+    if score_count != tag_count || !(shape == [tag_count as i64] || shape == [1, tag_count as i64])
+    {
+        return Err(InferError::InvalidModelOutput(format!(
+            "WD output shape {shape:?} with {score_count} scores does not match {tag_count} tags"
         )));
     }
     Ok(())
@@ -161,7 +175,8 @@ impl WdInferEngine {
                 input_name => Value::from_array(tensor)?,
             ];
             let outputs = guard.run(session_inputs)?;
-            let (_, data) = outputs[index].try_extract_tensor::<f32>()?;
+            let (shape, data) = outputs[index].try_extract_tensor::<f32>()?;
+            validate_wd_output(shape, data.len(), self.tag_meta.tags.len())?;
             data.to_vec()
         };
 
@@ -177,71 +192,18 @@ impl WdInferEngine {
     }
 
     fn build_result(&self, image_path: &Path, scores: &[f32]) -> TagResult {
-        // Cache per-category thresholds so a 70k-tag vocabulary does not do a
-        // map lookup plus two fallbacks per tag.
-        let mut thresholds: HashMap<&str, f32> = HashMap::new();
-
-        let rating = {
-            let mut best: Option<(f32, &str)> = None;
-            for &idx in &self.tag_meta.rating_indices {
-                if let (Some(&s), Some((name, _))) = (scores.get(idx), self.tag_meta.tags.get(idx))
-                {
-                    // Python seeds rating_max at 0.0, so a rating tag scoring
-                    // exactly 0.0 leaves the label at "general".
-                    if s > best.map_or(0.0, |(b, _)| b) {
-                        best = Some((s, name.as_str()));
-                    }
-                }
-            }
-            best.map(|(_, name)| name.to_string())
-                .unwrap_or_else(|| "general".to_string())
-        };
-
-        let mut preds: Vec<TagPrediction> = Vec::new();
-        for (i, (name, cat)) in self.tag_meta.tags.iter().enumerate() {
-            let Some(&conf) = scores.get(i) else { break };
-            if cat == "rating" {
-                continue;
-            }
-            let thr = *thresholds
-                .entry(cat.as_str())
-                .or_insert_with(|| self.spec.threshold_for(cat));
-            if conf < thr {
-                continue;
-            }
-            preds.push(TagPrediction {
-                tag: name.clone(),
-                confidence: conf,
-                category: cat.clone(),
-            });
-        }
-        preds.sort_by(|a, b| {
-            b.confidence
-                .partial_cmp(&a.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        TagResult {
-            tags: preds,
-            rating,
-            path: image_path.to_string_lossy().into_owned(),
-            model_id: self.model_id.clone(),
-        }
+        crate::wd_recipe::build_result(
+            image_path,
+            scores,
+            &self.tag_meta,
+            &self.model_id,
+            &self.spec,
+        )
     }
 
     fn preprocess(&self, path: &Path) -> Result<ArrayD<f32>, InferError> {
         let p = &self.spec.preprocess_spec;
-        let size = p.input_size;
-        let mut reader = image::ImageReader::open(path)?;
-        let mut limits = image::Limits::default();
-        limits.max_image_width = Some(MAX_WD_DECODED_IMAGE_DIMENSION);
-        limits.max_image_height = Some(MAX_WD_DECODED_IMAGE_DIMENSION);
-        limits.max_alloc = Some(MAX_WD_DECODED_IMAGE_BYTES);
-        reader.limits(limits);
-        let img = reader.decode()?;
-        validate_wd_image_dimensions(img.width(), img.height())?;
-
-        let canvas = letterbox(&img, size, p.pad_color)?;
+        let canvas = crate::wd_recipe::canvas(path, p)?;
         Ok(build_tensor(&canvas, p))
     }
 }
@@ -307,7 +269,7 @@ fn build_tensor(canvas: &image::RgbImage, p: &crate::profile::PreprocessSpec) ->
 ///     left in the RGB channels;
 ///   * the scaled dimensions truncate (`int(w * scale)`), they do not round.
 ///     Rounding shifts the paste offset by a pixel on many inputs.
-fn letterbox(
+pub(crate) fn letterbox(
     img: &image::DynamicImage,
     size: u32,
     pad_color: [u8; 3],
@@ -344,6 +306,16 @@ fn letterbox(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wd_output_must_match_the_vocabulary_and_single_image_shape() {
+        assert!(validate_wd_output(&[3], 3, 3).is_ok());
+        assert!(validate_wd_output(&[1, 3], 3, 3).is_ok());
+        assert!(validate_wd_output(&[1, 2], 2, 3).is_err());
+        assert!(validate_wd_output(&[1, 4], 4, 3).is_err());
+        assert!(validate_wd_output(&[3, 1], 3, 3).is_err());
+        assert!(validate_wd_output(&[2, 3], 6, 3).is_err());
+    }
 
     #[test]
     fn wd_image_dimension_limits_reject_oversized_and_overflowing_inputs() {

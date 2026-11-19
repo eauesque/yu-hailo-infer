@@ -8,7 +8,7 @@ use super::{
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct YuHailortTensorInfo {
+pub(super) struct YuHailortTensorInfo {
     name: [c_char; ffi::HAILO_MAX_STREAM_NAME_SIZE],
     height: u32,
     width: u32,
@@ -17,15 +17,38 @@ struct YuHailortTensorInfo {
     qp_zp: f32,
     qp_scale: f32,
     frame_size: usize,
+    format_order: u32,
 }
 
 #[repr(C)]
-struct YuHailortYoloMetadata {
-    inputs_count: usize,
-    outputs_count: usize,
-    inputs: [YuHailortTensorInfo; ffi::HAILO_MAX_STREAMS_COUNT],
-    outputs: [YuHailortTensorInfo; ffi::HAILO_MAX_STREAMS_COUNT],
+pub(super) struct YuHailortYoloMetadata {
+    pub(super) inputs_count: usize,
+    pub(super) outputs_count: usize,
+    pub(super) inputs: [YuHailortTensorInfo; ffi::HAILO_MAX_STREAMS_COUNT],
+    pub(super) outputs: [YuHailortTensorInfo; ffi::HAILO_MAX_STREAMS_COUNT],
 }
+
+// Must match shim.h; the tensor metadata ABI requires 64-bit pointers and size_t.
+const _: () = {
+    use core::mem::{offset_of, size_of};
+    assert!(size_of::<*const c_void>() == 8);
+    assert!(size_of::<usize>() == 8);
+    assert!(size_of::<YuHailortTensorInfo>() == 168);
+    assert!(offset_of!(YuHailortTensorInfo, name) == 0);
+    assert!(offset_of!(YuHailortTensorInfo, height) == 128);
+    assert!(offset_of!(YuHailortTensorInfo, width) == 132);
+    assert!(offset_of!(YuHailortTensorInfo, features) == 136);
+    assert!(offset_of!(YuHailortTensorInfo, format_type) == 140);
+    assert!(offset_of!(YuHailortTensorInfo, qp_zp) == 144);
+    assert!(offset_of!(YuHailortTensorInfo, qp_scale) == 148);
+    assert!(offset_of!(YuHailortTensorInfo, frame_size) == 152);
+    assert!(offset_of!(YuHailortTensorInfo, format_order) == 160);
+    assert!(size_of::<YuHailortYoloMetadata>() == 13456);
+    assert!(offset_of!(YuHailortYoloMetadata, inputs_count) == 0);
+    assert!(offset_of!(YuHailortYoloMetadata, outputs_count) == 8);
+    assert!(offset_of!(YuHailortYoloMetadata, inputs) == 16);
+    assert!(offset_of!(YuHailortYoloMetadata, outputs) == 6736);
+};
 
 impl Default for YuHailortYoloMetadata {
     fn default() -> Self {
@@ -35,10 +58,10 @@ impl Default for YuHailortYoloMetadata {
 }
 
 #[repr(C)]
-struct YuHailortBuffer {
-    name: *const c_char,
-    data: *mut c_void,
-    size: usize,
+pub(super) struct YuHailortBuffer {
+    pub(super) name: *const c_char,
+    pub(super) data: *mut c_void,
+    pub(super) size: usize,
 }
 
 enum YuHailortYolo {}
@@ -206,7 +229,10 @@ impl Drop for ShimYolo {
     }
 }
 
-fn convert_infos(raw: &[YuHailortTensorInfo], direction: VStreamDirection) -> Vec<VStreamInfo> {
+pub(super) fn convert_infos(
+    raw: &[YuHailortTensorInfo],
+    direction: VStreamDirection,
+) -> Vec<VStreamInfo> {
     raw.iter()
         .map(|info| VStreamInfo {
             name: super::metadata::c_char_array_to_string(&info.name),
@@ -221,10 +247,15 @@ fn convert_infos(raw: &[YuHailortTensorInfo], direction: VStreamDirection) -> Ve
                 scale: info.qp_scale,
             },
             format_type: info.format_type as ffi::HailoFormatType,
+            format_order: info.format_order as ffi::HailoFormatOrder,
             frame_size: info.frame_size,
         })
         .collect()
 }
+
+#[cfg(all(test, hailo_stub))]
+#[path = "shim_format_tests.rs"]
+mod format_tests;
 
 #[cfg(all(test, hailo_stub))]
 mod tests {

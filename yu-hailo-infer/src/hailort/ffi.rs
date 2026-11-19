@@ -30,6 +30,8 @@ pub(crate) const HAILO_FORMAT_TYPE_UINT8: HailoFormatType = 1;
 pub(crate) const HAILO_FORMAT_TYPE_UINT16: HailoFormatType = 2;
 pub(crate) const HAILO_FORMAT_TYPE_FLOAT32: HailoFormatType = 3;
 
+pub(crate) const HAILO_FORMAT_ORDER_NHWC: HailoFormatOrder = 1;
+
 pub(crate) const HAILO_H2D_STREAM: HailoStreamDirection = 0;
 pub(crate) const HAILO_D2H_STREAM: HailoStreamDirection = 1;
 

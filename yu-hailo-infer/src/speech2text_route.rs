@@ -149,6 +149,9 @@ async fn speech2text_transcribe(
     if let Some(response) = auth_error(&state, &headers) {
         return response;
     }
+    if let Some(response) = crate::router::hailort_session_error("hailort_s2t_generate_failed") {
+        return response;
+    }
     if body.audio_base64.is_empty() {
         return api_error(
             StatusCode::BAD_REQUEST,

@@ -14,7 +14,7 @@ This is the service itself, not a `-sys` binding crate. It targets the Hailo-10H
 | CLIP image embedding | `POST /v1/infer/clip-image` | Supported |
 | EmbeddingGemma 2 text embedding | `POST /v1/infer/text-embed` | Experimental host FP32, 256 dimensions |
 | CLIP text embedding | `POST /v1/infer/clip-text` | Supported |
-| WD-Tagger tag inference | `POST /v1/infer/wd` | Supported |
+| WD-Tagger tag inference | `POST /v1/infer/wd` | ONNX supported; HEF awaits device acceptance |
 | LLM text generation | `POST /v1/infer/llm/generate` (+`/stream`) | Supported |
 | LLM tokenize | `POST /v1/infer/llm/tokenize` | Supported |
 | VLM text generation | `POST /v1/infer/vlm/generate` (+`/stream`) | Supported (text-only; image-attached chat not supported) |
@@ -23,7 +23,7 @@ This is the service itself, not a `-sys` binding crate. It targets the Hailo-10H
 
 ## Supported Devices
 
-- **Hailo-10H**: Verified on hardware
+- **Hailo-10H**: Existing features verified on hardware; WD HEF inference remains device-unverified until acceptance
 - Hailo-8 / Hailo-8L and other models: **Not verified** (may work at HailoRT SDK level, but no support guaranteed)
 
 ## Dependencies
@@ -55,6 +55,34 @@ curl -X POST http://127.0.0.1:8100/v1/infer/clip-text \
   -H "Content-Type: application/json" \
   -d '{"text": "a photo of a cat"}'
 ```
+
+## WD-Tagger HEF backend (device-unverified)
+
+`POST /v1/infer/wd` accepts `backend` (default `"onnx"`, or `"hef"`), `hef_path`, `hef_sha256`, and `timeout_ms`, alongside the existing `path`, `model_id`, thresholds, and optional `profile` / `model_subdir`. HEF requires `hef_path` and `hef_sha256` (exactly 64 lowercase hexadecimal characters); the sidecar has no default HEF path. Missing, malformed, or mismatched hashes return 503 `hef_invalid`. ONNX ignores `hef_sha256` entirely and never logs it. `timeout_ms` applies only to HEF and defaults to, and is capped at, 120,000 ms. The sidecar does not automatically fall back to ONNX. Success has the form `{"ok":true,"backend_applied":"hef","profile_applied":false,"data":{...}}`. ONNX success returns `backend_applied:"onnx"`; supplying a profile returns `profile_applied:true`.
+
+The additive `GET /healthz` field `wd_hef` is `true` only in real HailoRT builds on Linux with the HEF route compiled. Stub builds always return `false`; `hailo_stub` keeps its existing meaning. Clients must treat an absent `wd_hef` in older responses as unsupported. Health does not open a HEF, access WD caches, or create a VDevice. The field advertises compiled capability, not model presence or device readiness.
+
+This supports ViT UINT8 HEFs: one 448×448×3 BGR/NHWC input (602,112 bytes) and one UINT8 output with exactly the vocabulary length, manually dequantized as `(q - zero_point) * scale`. Preprocessing shares ONNX's white padding and Lanczos3 resize; incompatible profiles are rejected. HEF still requires `model.onnx` and `selected_tags.csv` in the model directory under `--wd-cache-dir`. HEF files are opened with `O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC`, checked with fstat on that same fd for regular-file type and a 256 MiB maximum, then read with a bound and passed as a verified buffer to MemoryView. Terminal symlinks and special files are rejected.
+
+One process-static VDevice is shared across model handles; Hailo work is serialized on the common device thread. A single WD HEF cache slot is resident. Each request opens/fstats the HEF; a change in dev, inode, size, mtime (including nanoseconds), or requested digest releases the old handle before rereading. SHA256 of the bounded bytes from that same checked fd must match all 32 requested bytes before HailoRT open, metadata, or configure. Cache hits require both the file key and verified digest to match.
+
+`HAILO_COMMUNICATION_CLOSED` marks the process-wide Hailo session lost. New Hailo requests return 503 without calling HailoRT (WD HEF: `{"error":"device_error"}`); queued work is rejected too. CPU ONNX routes remain available while draining. `/healthz` always includes `hailo_session_lost`: normally `false`, then `true` with `ok:false`. The sidecar starts graceful shutdown after a short delay, drains HTTP responses, and exits with **70 (`EX_SOFTWARE`)** so yu-server can respawn it. A fresh process is required to recover. Embedders should use the library's `run()` to retain this exit behavior.
+
+HEF route errors contain only `{"error":"<code>"}`, without paths, detail, or message.
+
+| HTTP | error | Condition |
+|---|---|---|
+| 503 | `hef_invalid` | Missing `hef_path` or missing/malformed/mismatched `hef_sha256` with `backend:"hef"` |
+| 403 | `path outside allowed roots` | Image outside scan roots; identical to ONNX |
+| 422 | `image_invalid` | Image canonicalization, decode, or preprocessing failure |
+| 503 | `hef_not_found` | Missing or unreadable HEF |
+| 503 | `hef_invalid` | Invalid HEF type, size, metadata, or profile |
+| 503 | `device_busy` | Device queue or preprocessing budget full |
+| 503 | `device_error` | HailoRT failure, session lost, degraded state, or stopped device thread |
+| 503 | `hef_timeout` | Sidecar response deadline expired |
+| 503 | `model_not_downloaded` | Missing vocabulary or model.onnx |
+
+Existing authentication errors return 401; JSON extraction/type failures use axum responses. These changes still require device acceptance testing. This revision does not establish accuracy, fps, concurrent residency behavior, or memory usage.
 
 ## Instructing LLMs
 

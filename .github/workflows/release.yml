@@ -26,4 +26,4 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test (hardware smoke tests are #[ignore]'d and skipped — no Hailo device in CI)
-        run: cargo test --workspace
+        run: cargo test --workspace -- --test-threads=1

@@ -49,6 +49,7 @@ pub(crate) struct VStreamInfo {
     pub(crate) shape: TensorShape,
     pub(crate) quant: QuantInfo,
     pub(crate) format_type: ffi::HailoFormatType,
+    pub(crate) format_order: ffi::HailoFormatOrder,
     pub(crate) frame_size: usize,
 }
 
@@ -80,6 +81,7 @@ impl VStreamInfo {
                 scale: raw.quant_info.qp_scale,
             },
             format_type: raw.format.type_,
+            format_order: raw.format.order,
             frame_size,
         })
     }

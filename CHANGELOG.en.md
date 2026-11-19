@@ -7,6 +7,19 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- WD-Tagger HEF backend with `backend` / `hef_path` / `timeout_ms`, success `backend_applied`, path-free HEF errors, a 256 MiB limit, terminal symlink rejection, and a single WD HEF cache. `/healthz.wd_hef` is true only in real Linux builds and false in stub builds; health opens neither HEFs nor a VDevice. ONNX remains the default. HEF accuracy, throughput, and concurrent residency remain device-unverified until acceptance.
+
+### Fixed
+
+- Require `hef_sha256` (64 lowercase hex characters) for HEF and verify bytes from the checked fd before open; cache reuse also requires the verified digest. ONNX ignores the hash. On HailoRT session loss, reject Hailo requests with 503, expose always-present `hailo_session_lost` and `ok:false` in health, drain HTTP responses, then exit 70 (`EX_SOFTWARE`) for respawn.
+- Limit pending HailoRT tasks to four and return503 on overflow. Skip cancelled queued requests and stop unnecessary generation after LLM/VLM stream disconnection.
+- Keep only the latest WD recipe cached so threshold edits release old models. Reject output shape or vocabulary-length mismatches.
+- Serialize initial CLIP image ONNX loading to prevent duplicate sessions. Run release CI tests serially, matching local checks.
+
 ## [0.7.2] - 2026-10-16
 
 ### Fixed

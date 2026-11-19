@@ -1,8 +1,8 @@
 #pragma once
 
-// Keeps the real and stub C++ implementations on the same C ABI, with each
-// checked on the machine where it compiles. Rust's hand-written ffi.rs remains
-// unchecked, so a mismatch between Rust and this header can still be silent.
+// Keeps the real and stub C++ implementations on the same C ABI.
+// Tensor metadata layouts are checked here and in Rust's hand-written shim.rs.
+// These layouts require 64-bit pointers and size_t.
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -19,6 +19,7 @@ struct YuHailortTensorInfo {
     float qp_zp;
     float qp_scale;
     size_t frame_size;
+    uint32_t format_order;
 };
 
 struct YuHailortYoloMetadata {
@@ -28,6 +29,24 @@ struct YuHailortYoloMetadata {
     YuHailortTensorInfo outputs[40];
 };
 
+static_assert(sizeof(void *) == 8 && sizeof(size_t) == 8,
+    "Tensor metadata ABI requires 64-bit pointers and size_t");
+static_assert(sizeof(YuHailortTensorInfo) == 168);
+static_assert(offsetof(YuHailortTensorInfo, name) == 0);
+static_assert(offsetof(YuHailortTensorInfo, height) == 128);
+static_assert(offsetof(YuHailortTensorInfo, width) == 132);
+static_assert(offsetof(YuHailortTensorInfo, features) == 136);
+static_assert(offsetof(YuHailortTensorInfo, format_type) == 140);
+static_assert(offsetof(YuHailortTensorInfo, qp_zp) == 144);
+static_assert(offsetof(YuHailortTensorInfo, qp_scale) == 148);
+static_assert(offsetof(YuHailortTensorInfo, frame_size) == 152);
+static_assert(offsetof(YuHailortTensorInfo, format_order) == 160);
+static_assert(sizeof(YuHailortYoloMetadata) == 13456);
+static_assert(offsetof(YuHailortYoloMetadata, inputs_count) == 0);
+static_assert(offsetof(YuHailortYoloMetadata, outputs_count) == 8);
+static_assert(offsetof(YuHailortYoloMetadata, inputs) == 16);
+static_assert(offsetof(YuHailortYoloMetadata, outputs) == 6736);
+
 struct YuHailortBuffer {
     const char *name;
     void *data;
@@ -35,6 +54,7 @@ struct YuHailortBuffer {
 };
 
 struct YuHailortYolo;
+struct YuHailortWd;
 struct YuHailortSpeech2Text;
 struct YuHailortLlm;
 struct YuHailortLlmStream;
@@ -42,6 +62,18 @@ struct YuHailortVlm;
 struct YuHailortVlmStream;
 
 int yu_hailort_set_vdevice_group_id(const char *group_id);
+
+// HailoRT copies hef bytes during open; the caller may free them on return.
+int yu_hailort_wd_open(const uint8_t *hef, size_t size, YuHailortWd **out);
+int yu_hailort_wd_metadata(YuHailortWd *ctx, YuHailortYoloMetadata *metadata);
+// Consumes ctx on success AND failure; only success returns an owned handle.
+int yu_hailort_wd_configure(YuHailortWd *ctx, YuHailortWd **out);
+void yu_hailort_wd_release(YuHailortWd *ctx) noexcept;
+int yu_hailort_wd_run(YuHailortWd *ctx, const uint8_t *input, size_t input_size,
+    YuHailortBuffer *outputs, size_t outputs_count, uint32_t timeout_ms);
+bool yu_hailort_wd_is_timeout(int status);
+bool yu_hailort_is_communication_closed(int status);
+bool yu_hailort_wd_is_invalid_hef(int status);
 
 int yu_hailort_yolo_create(const char *hef_path, YuHailortYolo **out);
 void yu_hailort_yolo_release(YuHailortYolo *ctx);
@@ -179,6 +211,12 @@ int yu_hailort_vlm_stream_read(
 void yu_hailort_vlm_stream_release(YuHailortVlmStream *stream);
 
 size_t yu_hailort_stub_vdevice_create_count(void);
+// Stub-only test seams; stage 1=open, 2=metadata error, 3=configure invalid,
+// 4=rejected metadata, 5=configure device error. Events: 1..5=open/meta/config/release/run.
+void yu_hailort_stub_wd_fail(int stage);
+size_t yu_hailort_stub_wd_count(size_t event);
+const char *yu_hailort_stub_wd_calls(void);
+void yu_hailort_stub_vdevice_fail_initial(void);
 size_t yu_hailort_stub_yolo_create_count(void);
 size_t yu_hailort_stub_yolo_release_count(void);
 size_t yu_hailort_stub_s2t_create_count(void);

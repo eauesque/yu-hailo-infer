@@ -54,7 +54,9 @@ impl Drop for VDevice {
     fn drop(&mut self) {
         if !self.raw.is_null() {
             // SAFETY: raw is owned by this RAII wrapper and released once here.
-            let _ = unsafe { ffi::hailo_release_vdevice(self.raw) };
+            let _ = check_status("release_vdevice", unsafe {
+                ffi::hailo_release_vdevice(self.raw)
+            });
         }
     }
 }
@@ -106,7 +108,7 @@ impl Drop for Hef {
     fn drop(&mut self) {
         if !self.raw.is_null() {
             // SAFETY: raw is owned by this RAII wrapper and released once here.
-            let _ = unsafe { ffi::hailo_release_hef(self.raw) };
+            let _ = check_status("release_hef", unsafe { ffi::hailo_release_hef(self.raw) });
         }
     }
 }
@@ -136,7 +138,9 @@ impl Drop for ConfiguredNetworkGroup<'_> {
     fn drop(&mut self) {
         if !self.raw.is_null() {
             // SAFETY: Shutdown is optional and cancels ongoing operations before VDevice drop.
-            let _ = unsafe { ffi::hailo_shutdown_network_group(self.raw) };
+            let _ = check_status("shutdown_network_group", unsafe {
+                ffi::hailo_shutdown_network_group(self.raw)
+            });
         }
     }
 }
@@ -150,7 +154,9 @@ impl Drop for ActivatedNetworkGroup<'_> {
     fn drop(&mut self) {
         if !self.raw.is_null() {
             // SAFETY: raw is owned by this activation wrapper and released once here.
-            let _ = unsafe { ffi::hailo_deactivate_network_group(self.raw) };
+            let _ = check_status("deactivate_network_group", unsafe {
+                ffi::hailo_deactivate_network_group(self.raw)
+            });
         }
     }
 }

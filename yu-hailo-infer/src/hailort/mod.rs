@@ -6,9 +6,17 @@ mod ffi;
 mod llm;
 mod metadata;
 mod safe;
+pub(crate) use error::session;
 mod shim;
 mod speech2text;
 mod vlm;
+pub(crate) mod wd;
+#[cfg(target_os = "linux")]
+pub(crate) mod wd_hef;
+#[cfg(all(test, hailo_stub))]
+pub(crate) mod wd_stub;
+#[cfg(target_os = "linux")]
+pub(crate) mod wd_validate;
 mod yolo;
 
 #[allow(unused_imports)]

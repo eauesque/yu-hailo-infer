@@ -19,6 +19,7 @@ impl YoloModelMetadata {
                     scale: 1.0,
                 },
                 format_type: super::ffi::HAILO_FORMAT_TYPE_UINT8,
+                format_order: super::ffi::HAILO_FORMAT_ORDER_NHWC,
                 frame_size: input_frame_size,
             }],
             outputs: Vec::new(),
