@@ -65,5 +65,29 @@ pub async fn run() {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("bind yu-infer listener");
-    hailort::session::serve(listener, app, |code| std::process::exit(code)).await;
+    serve(listener, app).await;
+}
+
+async fn serve<L>(listener: L, app: axum::Router)
+where
+    L: axum::serve::Listener,
+    L::Addr: std::fmt::Debug,
+{
+    // Only tests using the real launcher opt into process termination.
+    #[cfg(test)]
+    hailort::session::enable_test_watchdog();
+    hailort::session::serve(listener, app, exit_process).await;
+}
+
+fn exit_process(code: i32) {
+    use std::io::{self, Write};
+
+    let _ = io::stdout().flush();
+    let _ = io::stderr().flush();
+    hard_exit(code);
+}
+
+fn hard_exit(code: i32) -> ! {
+    // SAFETY: bypass native exit handlers that can wait on the lost HailoRT session.
+    unsafe { libc::_exit(code) }
 }

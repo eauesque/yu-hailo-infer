@@ -392,15 +392,18 @@ void yu_hailort_vlm_stream_release(YuHailortVlmStream *) {}
 // hailo_* C API stubs — required by safe.rs/metadata.rs RAII wrappers.
 // None of the hailo hardware API is available without hailort.hpp; these
 // return HAILO_STUB_ERR so the process can start and tests can run.
-int hailo_create_vdevice(void *, void **) { return HAILO_STUB_ERR; }
-int hailo_release_vdevice(void *) { return HAILO_STUB_ERR; }
+static thread_local bool c_api_communication_closed = false;
+void yu_hailort_stub_c_api_communication_closed(bool closed) { c_api_communication_closed = closed; }
+static int c_api_status() { return c_api_communication_closed ? HAILO_COMMUNICATION_CLOSED : HAILO_STUB_ERR; }
+int hailo_create_vdevice(void *, void **) { return c_api_status(); }
+int hailo_release_vdevice(void *) { return c_api_status(); }
 int hailo_create_hef_file(void **, const char *) { return HAILO_STUB_ERR; }
-int hailo_release_hef(void *) { return HAILO_STUB_ERR; }
+int hailo_release_hef(void *) { return c_api_status(); }
 int hailo_hef_get_all_vstream_infos(void *, const char *, void *, size_t *) { return HAILO_STUB_ERR; }
 int hailo_configure_vdevice(void *, void *, void *, void **, size_t *) { return HAILO_STUB_ERR; }
-int hailo_shutdown_network_group(void *) { return HAILO_STUB_ERR; }
+int hailo_shutdown_network_group(void *) { return c_api_status(); }
 int hailo_activate_network_group(void *, void *, void **) { return HAILO_STUB_ERR; }
-int hailo_deactivate_network_group(void *) { return HAILO_STUB_ERR; }
+int hailo_deactivate_network_group(void *) { return c_api_status(); }
 int hailo_hef_make_input_vstream_params(void *, const char *, bool, int, void *, size_t *) { return HAILO_STUB_ERR; }
 int hailo_hef_make_output_vstream_params(void *, const char *, bool, int, void *, size_t *) { return HAILO_STUB_ERR; }
 int hailo_get_vstream_frame_size(void *, void *, size_t *) { return HAILO_STUB_ERR; }

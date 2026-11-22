@@ -4,6 +4,11 @@ use std::io::Write;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+// These fixtures mutate the process-wide device queue, cache, and preprocessing budget.
+fn isolated(name: &str) -> bool {
+    crate::hailort::wd_hef::tests::stub::isolated(&format!("router::tests::wd_hef_route_tests::{name}"))
+}
+
 struct Fixture {
     dir: crate::hailort::wd_hef::tests::TempDir,
     state: AppState,
@@ -69,16 +74,22 @@ async fn dd_counts() -> ([usize; 7], usize) {
 
 #[tokio::test]
 async fn dd_session_lost_from_wd_rejects_clip_and_degrades_health() {
-    if crate::hailort::wd_hef::tests::stub::isolated("router::tests::wd_hef_route_tests::dd_session_lost_from_wd_rejects_clip_and_degrades_health") { return; }
+    if isolated("dd_session_lost_from_wd_rejects_clip_and_degrades_health") { return; }
     let f = Fixture::new(vec![], 30, 0).await;
     let normal = dd_route(f.state.clone(), "/healthz", None).await.1;
+    let health_keys = ["clip_image_onnx", "hailo_session_lost", "hailo_stub", "instance_id",
+        "ok", "text_embed", "uptime_secs", "wd_hef"];
+    assert_eq!(normal.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(), health_keys);
+    assert_eq!(normal["ok"], true);
     assert_eq!(normal["hailo_session_lost"], false);
     error_eq(f.request().await, StatusCode::SERVICE_UNAVAILABLE, "device_error");
     assert!(crate::hailort::session::is_lost());
     let before = dd_counts().await;
     let health = dd_route(f.state.clone(), "/healthz", None).await.1;
+    assert_eq!(health.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(), health_keys);
     assert_eq!(health["ok"], false);
     assert_eq!(health["hailo_session_lost"], true);
+    assert_eq!(health["wd_hef"], normal["wd_hef"]);
     let clip = dd_route(f.state.clone(), "/v1/infer/clip-image", Some(json!({"image_base64": "AA=="}))).await;
     assert_eq!(clip.0, StatusCode::SERVICE_UNAVAILABLE);
     error_eq(f.request().await, StatusCode::SERVICE_UNAVAILABLE, "device_error");
@@ -98,6 +109,14 @@ async fn dd_session_lost_from_wd_rejects_clip_and_degrades_health() {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}: {body}");
         assert_eq!(body["ok"], false);
     }
+    // The wire fixture's ONNX model has a single output score.
+    std::fs::write(f.dir.0.join("model/selected_tags.csv"), "name,category\ncat,0\n").unwrap();
+    let mut onnx = f.body.clone();
+    onnx["backend"] = json!("onnx");
+    let (status, body) = wd_wire_request(f.state.clone(), onnx).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["backend_applied"], "onnx");
+    assert_eq!(body["data"]["tags"][0]["tag"], "cat");
     assert_eq!(dd_counts().await, before);
     assert!(matches!(run_hailort_task(|_| Ok(())).await, Err(HailoTaskError::Unavailable(_))));
     let mut ctx = DeviceCtx::default();
@@ -106,7 +125,7 @@ async fn dd_session_lost_from_wd_rejects_clip_and_degrades_health() {
 
 #[tokio::test]
 async fn dd_session_lost_from_clip_create_degrades_health() {
-    if crate::hailort::wd_hef::tests::stub::isolated("router::tests::wd_hef_route_tests::dd_session_lost_from_clip_create_degrades_health") { return; }
+    if isolated("dd_session_lost_from_clip_create_degrades_health") { return; }
     extern "C" { fn yu_hailort_stub_yolo_communication_closed(closed: bool); }
     let f = Fixture::new(vec![], 0, 0).await;
     run_hailort_task(|_| {
@@ -125,7 +144,7 @@ async fn dd_session_lost_from_clip_create_degrades_health() {
 
 #[tokio::test]
 async fn dd_session_lost_exit_drains_response_once() {
-    if crate::hailort::wd_hef::tests::stub::isolated("router::tests::wd_hef_route_tests::dd_session_lost_exit_drains_response_once") { return; }
+    if isolated("dd_session_lost_exit_drains_response_once") { return; }
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let f = Fixture::new(vec![], 30, 0).await;
@@ -153,25 +172,34 @@ async fn dd_session_lost_exit_drains_response_once() {
 
 #[tokio::test]
 async fn dd_hef_sha256_missing_or_malformed_is_invalid() {
+    if isolated("dd_hef_sha256_missing_or_malformed_is_invalid") { return; }
     let mut f = Fixture::new(vec![], 0, 0).await;
+    let before = dd_counts().await;
+    f.body.as_object_mut().unwrap().remove("hef_sha256");
+    error_eq(f.request().await, StatusCode::SERVICE_UNAVAILABLE, "hef_invalid");
     for hash in [Value::Null, json!("A".repeat(64)), json!("0".repeat(63)), json!("g".repeat(64))] {
         f.body["hef_sha256"] = hash;
         error_eq(f.request().await, StatusCode::SERVICE_UNAVAILABLE, "hef_invalid");
     }
+    assert_eq!(dd_counts().await, before, "invalid hash reached HailoRT");
+    assert!(!crate::hailort::session::is_lost());
 }
 
 #[tokio::test]
 async fn dd_hef_sha256_wrong_never_opens() {
+    if isolated("dd_hef_sha256_wrong_never_opens") { return; }
     let mut f = Fixture::new(vec![], 0, 0).await;
     let before = run_hailort_task(|_| Ok(crate::hailort::wd_hef::tests::stub::counts())).await.unwrap();
     f.body["hef_sha256"] = json!("0".repeat(64));
     error_eq(f.request().await, StatusCode::SERVICE_UNAVAILABLE, "hef_invalid");
     let after = run_hailort_task(|_| Ok(crate::hailort::wd_hef::tests::stub::counts())).await.unwrap();
     assert_eq!(&after[1..4], &before[1..4], "wrong digest reached open/metadata/configure");
+    assert!(!crate::hailort::session::is_lost());
 }
 
 #[tokio::test]
 async fn dd_hef_sha256_changed_request_does_not_trust_resident() {
+    if isolated("dd_hef_sha256_changed_request_does_not_trust_resident") { return; }
     let mut f = Fixture::new(vec![], 0, 0).await;
     assert_eq!(f.request().await.0, StatusCode::OK);
     f.body["hef_sha256"] = json!("0".repeat(64));
@@ -180,6 +208,7 @@ async fn dd_hef_sha256_changed_request_does_not_trust_resident() {
 
 #[tokio::test]
 async fn revfix_empty_hef_returns_hef_invalid() {
+    if isolated("revfix_empty_hef_returns_hef_invalid") { return; }
     let f = Fixture::new(vec![], 0, 0).await;
     std::fs::write(f.body["hef_path"].as_str().unwrap(), []).unwrap();
     error_eq(f.request().await, StatusCode::SERVICE_UNAVAILABLE, "hef_invalid");
@@ -187,6 +216,7 @@ async fn revfix_empty_hef_returns_hef_invalid() {
 
 #[tokio::test]
 async fn revfix_expired_device_closure_preserves_resident_without_open() {
+    if isolated("revfix_expired_device_closure_preserves_resident_without_open") { return; }
     let mut f = Fixture::new(vec![], 0, 0).await;
     assert_eq!(f.request().await.0, StatusCode::OK);
     let before = run_hailort_task(|_| Ok(crate::hailort::wd_hef::tests::stub::counts())).await.unwrap();
@@ -206,6 +236,7 @@ async fn revfix_expired_device_closure_preserves_resident_without_open() {
 
 #[tokio::test]
 async fn t10_scan_root_refusal_matches_onnx_and_missing_image_stays_422() {
+    if isolated("t10_scan_root_refusal_matches_onnx_and_missing_image_stays_422") { return; }
     let f = Fixture::new(vec![], 0, 0).await;
     f.state.scan_roots.write().unwrap().roots = vec![f.dir.0.join("model").canonicalize().unwrap()];
     let mut bodies = Vec::new();
@@ -232,6 +263,7 @@ async fn t10_scan_root_refusal_matches_onnx_and_missing_image_stays_422() {
 
 #[tokio::test]
 async fn t9_metadata_table_rejects_before_configure() {
+    if isolated("t9_metadata_table_rejects_before_configure") { return; }
     let violations = [
         (0, 0.0), (0, 2.0), (0, 41.0), (2, 447.0), (3, 447.0), (4, 4.0),
         (5, 2.0), (6, 0.0), (7, 602_111.0), (1, 0.0), (1, 2.0), (1, 41.0),
@@ -253,6 +285,7 @@ async fn t9_metadata_table_rejects_before_configure() {
 
 #[tokio::test]
 async fn t9_flattened_output_configures_once_and_dequantizes_nonzero_zp() {
+    if isolated("t9_flattened_output_configures_once_and_dequantizes_nonzero_zp") { return; }
     for fields in [vec![], vec![(9, 3.0), (10, 1.0)], vec![(8, 3.0), (10, 1.0)]] {
         let f = Fixture::new(fields, 0, 0).await;
         for _ in 0..2 {
@@ -274,6 +307,7 @@ async fn t9_flattened_output_configures_once_and_dequantizes_nonzero_zp() {
 
 #[tokio::test]
 async fn t9_cache_hit_revalidates_vocabulary() {
+    if isolated("t9_cache_hit_revalidates_vocabulary") { return; }
     let f = Fixture::new(vec![], 0, 0).await;
     assert_eq!(f.request().await.0, StatusCode::OK);
     std::fs::write(f.dir.0.join("model/selected_tags.csv"), "name,category\ncat,0\n").unwrap();
@@ -283,6 +317,7 @@ async fn t9_cache_hit_revalidates_vocabulary() {
 
 #[tokio::test]
 async fn t9_profile_table_and_acknowledgement() {
+    if isolated("t9_profile_table_and_acknowledgement") { return; }
     let f = Fixture::new(vec![], 0, 0).await;
     let profile = serde_json::to_value(infer_core::builtin_wd_profile("model.onnx", 0.4, 0.7)).unwrap();
     let mut body = f.body.clone();
@@ -319,6 +354,7 @@ impl Write for Logs {
 
 #[tokio::test]
 async fn t9_http_error_table_and_path_free_logs() {
+    if isolated("t9_http_error_table_and_path_free_logs") { return; }
     let logs = Logs::default();
     let writer = logs.clone();
     let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
@@ -355,6 +391,7 @@ async fn t9_http_error_table_and_path_free_logs() {
 
 #[tokio::test]
 async fn t9_preprocessing_busy_is_separate_from_queue_full() {
+    if isolated("t9_preprocessing_busy_is_separate_from_queue_full") { return; }
     let f = Fixture::new(vec![], 0, 0).await;
     let permit = media_preprocessing_semaphore().try_acquire_many_owned(
         media_preprocessing_permits(MAX_MEDIA_PREPROCESSING_BYTES)).unwrap();
@@ -366,28 +403,78 @@ async fn t9_preprocessing_busy_is_separate_from_queue_full() {
 
 #[tokio::test]
 async fn t9_queue_full_is_device_busy() {
+    if isolated("t9_queue_full_is_device_busy") { return; }
     let f = Fixture::new(vec![], 0, 0).await;
+    let (started, release) = enqueue_device_blocker();
+    started.await.unwrap();
+    fill_device_queue();
+    let actual = f.request().await;
+    let clip = dd_route(f.state.clone(), "/v1/infer/clip-image", Some(json!({"image_base64": "AA=="}))).await;
+    release.send(()).unwrap();
+    error_eq(actual, StatusCode::SERVICE_UNAVAILABLE, "device_busy");
+    assert_eq!(clip, (StatusCode::SERVICE_UNAVAILABLE, json!({
+        "ok": false,
+        "error": "hailort_clip_image_metadata_failed",
+        "message": "HailoRT device queue is full",
+    })));
+}
+
+fn enqueue_device_blocker() -> (tokio::sync::oneshot::Receiver<()>, mpsc::Sender<()>) {
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let first = run_hailort_task(move |_| {
+    assert!(hailort_device_sender().try_send(Box::new(move |_| {
         started_tx.send(()).unwrap();
-        release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-        Ok(())
-    });
-    tokio::pin!(first);
-    assert!(futures_util::poll!(&mut first).is_pending());
-    started_rx.await.unwrap();
+        let _ = release_rx.recv_timeout(Duration::from_secs(10));
+    })).is_ok());
+    (started_rx, release_tx)
+}
+
+fn fill_device_queue() {
     for _ in 0..MAX_PENDING_DEVICE_TASKS {
         assert!(hailort_device_sender().try_send(Box::new(|_| {})).is_ok());
     }
-    let actual = f.request().await;
-    release_tx.send(()).unwrap();
-    first.await.unwrap();
-    error_eq(actual, StatusCode::SERVICE_UNAVAILABLE, "device_busy");
+}
+
+#[tokio::test]
+async fn t27a_clip_image_run_queue_full_keeps_error_shape() {
+    use base64::Engine;
+
+    if isolated("t27a_clip_image_run_queue_full_keeps_error_shape") { return; }
+    let f = Fixture::new(vec![], 0, 0).await;
+    let hef_path = f.body["hef_path"].as_str().unwrap().to_owned();
+    run_hailort_task({
+        let hef_path = hef_path.clone();
+        move |ctx| {
+            ctx.infer_models.insert(hef_path, ShimYolo::stub_with_metadata());
+            Ok(())
+        }
+    }).await.unwrap();
+    let image_base64 = base64::engine::general_purpose::STANDARD
+        .encode(std::fs::read(f.dir.0.join("image.png")).unwrap());
+
+    let (started, release) = enqueue_device_blocker();
+    started.await.unwrap();
+    let clip = dd_route(f.state.clone(), "/v1/infer/clip-image",
+        Some(json!({"hef_path": hef_path, "image_base64": image_base64})));
+    tokio::pin!(clip);
+    assert!(futures_util::poll!(&mut clip).is_pending());
+    // This blocker runs after metadata. The next poll reaches the run with a full queue.
+    let (run_started, run_release) = enqueue_device_blocker();
+    release.send(()).unwrap();
+    run_started.await.unwrap();
+    fill_device_queue();
+    let actual = clip.await;
+    run_release.send(()).unwrap();
+    assert_eq!(actual, (StatusCode::SERVICE_UNAVAILABLE, json!({
+        "ok": false,
+        "error": "hailort_clip_image_failed",
+        "message": "HailoRT device queue is full",
+    })));
 }
 
 #[test]
 fn t9_preprocessing_deadline_skips_run() {
+    if isolated("t9_preprocessing_deadline_skips_run") { return; }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .max_blocking_threads(1)
@@ -427,6 +514,7 @@ fn t9_preprocessing_deadline_skips_run() {
 
 #[tokio::test]
 async fn t9_run_deadline_bounds_worker_reply() {
+    if isolated("t9_run_deadline_bounds_worker_reply") { return; }
     let mut f = Fixture::new(vec![], 0, 5000).await;
     image::RgbImage::from_pixel(1, 1, image::Rgb([10, 20, 30]))
         .save(f.dir.0.join("image.png")).unwrap();
@@ -444,6 +532,7 @@ async fn t9_run_deadline_bounds_worker_reply() {
 
 #[tokio::test]
 async fn t9_uint8_bgr_letterbox_and_run_timeout() {
+    if isolated("t9_uint8_bgr_letterbox_and_run_timeout") { return; }
     let mut f = Fixture::new(vec![], 0, 0).await;
     f.body["timeout_ms"] = json!(120_000);
     let (status, response) = f.request().await;
@@ -458,6 +547,7 @@ async fn t9_uint8_bgr_letterbox_and_run_timeout() {
 
 #[tokio::test]
 async fn t9_degraded_worker_maps_device_error() {
+    if isolated("t9_degraded_worker_maps_device_error") { return; }
     let f = Fixture::new(vec![], 0, 0).await;
     run_hailort_task(|ctx| { ctx.degraded = true; Ok(()) }).await.unwrap();
     let actual = f.request().await;
@@ -472,6 +562,7 @@ async fn t9_degraded_worker_maps_device_error() {
 
 #[tokio::test]
 async fn t9_native_timeout_is_sidecar_hef_timeout() {
+    if isolated("t9_native_timeout_is_sidecar_hef_timeout") { return; }
     let f = Fixture::new(vec![], 7, 0).await;
     error_eq(f.request().await, StatusCode::SERVICE_UNAVAILABLE, "hef_timeout");
     assert_eq!(f.configure_delta().await, 1);

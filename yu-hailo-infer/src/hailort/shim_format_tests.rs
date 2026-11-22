@@ -5,12 +5,19 @@ extern "C" {
     fn yu_hailort_stub_yolo_enable_metadata(ctx: *mut YuHailortYolo);
 }
 
+impl ShimYolo {
+    pub(crate) fn stub_with_metadata() -> Self {
+        let model = Self::create("model").unwrap();
+        assert!(model.metadata().is_err());
+        // SAFETY: model owns the live stub context; this only enables its metadata fixture.
+        unsafe { yu_hailort_stub_yolo_enable_metadata(model.raw.as_ptr()) };
+        model
+    }
+}
+
 #[test]
 fn stub_yolo_metadata_reports_nhwc() {
-    let model = ShimYolo::create("model").unwrap();
-    assert!(model.metadata().is_err());
-    // SAFETY: model owns the live stub context; this only enables its metadata fixture.
-    unsafe { yu_hailort_stub_yolo_enable_metadata(model.raw.as_ptr()) };
+    let model = ShimYolo::stub_with_metadata();
     let metadata = super::super::yolo_metadata(&model).unwrap();
     assert_eq!(metadata.inputs.len(), 1);
     assert_eq!(metadata.outputs.len(), 1);

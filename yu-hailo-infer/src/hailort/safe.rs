@@ -1,7 +1,9 @@
 use std::ffi::CString;
 use std::ptr;
 
-use super::{check_status, ffi, HailoRtError, HailoRtResult, VStreamInfo};
+use super::{
+    check_status, error::check_teardown_status, ffi, HailoRtError, HailoRtResult, VStreamInfo,
+};
 
 pub(crate) struct VDevice {
     raw: ffi::HailoVDevice,
@@ -54,7 +56,7 @@ impl Drop for VDevice {
     fn drop(&mut self) {
         if !self.raw.is_null() {
             // SAFETY: raw is owned by this RAII wrapper and released once here.
-            let _ = check_status("release_vdevice", unsafe {
+            let _ = check_teardown_status("release_vdevice", unsafe {
                 ffi::hailo_release_vdevice(self.raw)
             });
         }
@@ -108,7 +110,8 @@ impl Drop for Hef {
     fn drop(&mut self) {
         if !self.raw.is_null() {
             // SAFETY: raw is owned by this RAII wrapper and released once here.
-            let _ = check_status("release_hef", unsafe { ffi::hailo_release_hef(self.raw) });
+            let _ =
+                check_teardown_status("release_hef", unsafe { ffi::hailo_release_hef(self.raw) });
         }
     }
 }
@@ -138,7 +141,7 @@ impl Drop for ConfiguredNetworkGroup<'_> {
     fn drop(&mut self) {
         if !self.raw.is_null() {
             // SAFETY: Shutdown is optional and cancels ongoing operations before VDevice drop.
-            let _ = check_status("shutdown_network_group", unsafe {
+            let _ = check_teardown_status("shutdown_network_group", unsafe {
                 ffi::hailo_shutdown_network_group(self.raw)
             });
         }
@@ -154,7 +157,7 @@ impl Drop for ActivatedNetworkGroup<'_> {
     fn drop(&mut self) {
         if !self.raw.is_null() {
             // SAFETY: raw is owned by this activation wrapper and released once here.
-            let _ = check_status("deactivate_network_group", unsafe {
+            let _ = check_teardown_status("deactivate_network_group", unsafe {
                 ffi::hailo_deactivate_network_group(self.raw)
             });
         }
@@ -172,5 +175,52 @@ mod tests {
             Err(err) => err,
         };
         assert!(matches!(err, HailoRtError::Nul(_)));
+    }
+
+    #[cfg(all(hailo_stub, target_os = "linux"))]
+    #[test]
+    fn t27a_teardown_status_does_not_lose_session() {
+        use crate::hailort::{session, wd_hef::tests::stub::isolated};
+        if isolated("hailort::safe::tests::t27a_teardown_status_does_not_lose_session") {
+            return;
+        }
+        extern "C" {
+            fn yu_hailort_stub_c_api_communication_closed(closed: bool);
+        }
+        // SAFETY: the setter only updates thread-local stub state.
+        unsafe { yu_hailort_stub_c_api_communication_closed(true) };
+        // The stub returns the injected status without dereferencing the handles.
+        let raw = ptr::dangling_mut();
+        let device = VDevice { raw };
+        let group = ConfiguredNetworkGroup {
+            raw,
+            _device: &device,
+        };
+        drop(ActivatedNetworkGroup {
+            raw,
+            _group: &group,
+        });
+        assert!(
+            !session::is_lost(),
+            "deactivate_network_group marked the session lost"
+        );
+        drop(group);
+        assert!(
+            !session::is_lost(),
+            "shutdown_network_group marked the session lost"
+        );
+        drop(Hef { raw });
+        assert!(!session::is_lost(), "release_hef marked the session lost");
+        drop(device);
+        assert!(
+            !session::is_lost(),
+            "release_vdevice marked the session lost"
+        );
+
+        assert!(VDevice::new_default().is_err());
+        assert!(
+            session::is_lost(),
+            "create_vdevice failed to mark the session lost"
+        );
     }
 }
