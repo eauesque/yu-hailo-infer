@@ -823,6 +823,9 @@ fn env_or_default_path(env_key: &str, default_name: &str) -> PathBuf {
     if let Some(path) = std::env::var_os(env_key) {
         return PathBuf::from(path);
     }
+    if let Some(dir) = std::env::var_os("HAILO_HEF_DIR").filter(|dir| !dir.is_empty()) {
+        return PathBuf::from(dir).join(default_name);
+    }
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/home/pi"));
@@ -2193,7 +2196,84 @@ mod tests {
     use crate::hailort::stub_counts;
     use axum::body::Body;
     use axum::http::Request;
+    use std::ffi::OsStr;
     use tower::ServiceExt;
+
+    fn with_hef_env<T>(
+        home: &std::path::Path,
+        hef_dir: &OsStr,
+        clip_hef: Option<&OsStr>,
+        resolve: impl FnOnce() -> T,
+    ) -> T {
+        let _guard = crate::startup::ENV_LOCK.lock().unwrap();
+        let previous = [
+            ("HOME", Some(home.as_os_str())),
+            ("HAILO_HEF_DIR", Some(hef_dir)),
+            ("HAILO_CLIP_HEF", clip_hef),
+            ("HAILO_YOLO_HEF", None),
+        ]
+        .map(|(key, value)| {
+            let previous = std::env::var_os(key);
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+            (key, previous)
+        });
+
+        let path = resolve();
+        for (key, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        path
+    }
+
+    #[test]
+    fn hef_dir_supplies_clip_default() {
+        let hef_dir = std::env::temp_dir();
+        let home = hef_dir.join("isolated-home");
+        let path = with_hef_env(&home, hef_dir.as_os_str(), None, || {
+            clip_image_hef_path(None)
+        });
+        assert_eq!(path, hef_dir.join("clip_vit_b_16_image_encoder.hef"));
+    }
+
+    #[test]
+    fn hef_dir_supplies_yolo_default() {
+        let hef_dir = std::env::temp_dir();
+        let home = hef_dir.join("isolated-home");
+        let path = with_hef_env(&home, hef_dir.as_os_str(), None, || {
+            yolo_hef_path(&HefQuery { hef_path: None })
+        });
+        assert_eq!(path, hef_dir.join("yolov8n.hef"));
+    }
+
+    #[test]
+    fn hef_dir_yields_to_clip_env_override() {
+        let hef_dir = std::env::temp_dir();
+        let home = hef_dir.join("isolated-home");
+        let override_path = home.join("custom-clip.hef");
+        let path = with_hef_env(
+            &home,
+            hef_dir.as_os_str(),
+            Some(override_path.as_os_str()),
+            || clip_image_hef_path(None),
+        );
+        assert_eq!(path, override_path);
+    }
+
+    #[test]
+    fn hef_dir_empty_falls_back_to_home() {
+        let home = std::env::temp_dir().join("isolated-home");
+        let path = with_hef_env(&home, OsStr::new(""), None, || clip_image_hef_path(None));
+        assert_eq!(
+            path,
+            home.join("hailo_models/clip_vit_b_16_image_encoder.hef")
+        );
+    }
 
     fn test_state(scan_roots: Vec<PathBuf>) -> AppState {
         AppState {

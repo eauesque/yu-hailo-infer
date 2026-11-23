@@ -48,11 +48,11 @@ pub fn read_startup_contract(mut reader: impl Read) -> Result<StartupContract, S
 }
 
 #[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn read_with_group_env(input: &str, value: Option<&str>) -> StartupContract {
         let _guard = ENV_LOCK.lock().unwrap();
