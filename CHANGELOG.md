@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- CLIPテキストONNXに宣言された入力だけを渡し、`input_ids` のみを宣言するモデルに対応。未対応の入力や `input_ids` の欠落はエラーにする。
 - HEF要求の `hef_sha256`（小文字16進数64桁）を必須化し、同じ検査済みfdの内容をopen前に照合。cache再利用にもdigest一致を要求し、ONNXでは無視する。HailoRT session喪失後はHailo要求を503で拒否し、`/healthz` に常設の `hailo_session_lost` と `ok:false` を返す。HTTP応答完了後に70（`EX_SOFTWARE`）で終了して再起動を促す。
 - HailoRT の待機を最大4件に制限し、超過は503で返す。実行前の切断済み要求と、切断されたLLM/VLMストリームの不要な生成を停止する。
 - WDキャッシュを直近1設定に制限し、閾値変更で古いモデルを保持し続けない。出力形状・タグ件数の不一致はエラーにする。
